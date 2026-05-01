@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --brand-navy: #0e2a47;
+  --brand-blue: #185fa5;
+  --brand-blue-soft: #e6f1fb;
+  --brand-orange: #f97316;
+  --brand-orange-soft: #ffe6cf;
+  --bg: #ffffff;
+  --bg-soft: #f6f8fb;
+  --line: #e3e8ef;
+  --line-soft: #eef2f7;
+  --ink: #1f2a37;
+  --subtle: #5c6b80;
+  --mute: #8b95a7;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(
+      1100px 480px at 8% -20%,
+      rgba(249, 115, 22, 0.08),
+      transparent 60%
+    ),
+    radial-gradient(
+      900px 480px at 110% 0%,
+      rgba(24, 95, 165, 0.08),
+      transparent 60%
+    ),
+    var(--bg);
+  color: var(--ink);
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(14, 42, 71, 0.16);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(14, 42, 71, 0.28);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Subtle grid backdrop used by graph view */
+.graph-bg {
+  background-image:
+    linear-gradient(rgba(14, 42, 71, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(14, 42, 71, 0.04) 1px, transparent 1px);
+  background-size: 24px 24px;
+  background-position: -1px -1px;
+}
+
+.brand-shadow {
+  box-shadow:
+    0 1px 2px rgba(14, 42, 71, 0.06),
+    0 8px 24px rgba(14, 42, 71, 0.06);
+}

@@ -1,0 +1,57 @@
+# Sensitive document data and runtime state (NEVER commit)
+backend/data/
+backend/data/documents/
+backend/data/checkpoints.sqlite
+backend/data/checkpoints.sqlite-journal
+backend/data/checkpoints.sqlite-wal
+backend/data/checkpoints.sqlite-shm
+
+# Document files anywhere in the tree (defense in depth)
+*.pdf
+*.docx
+*.xlsx
+*.csv
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# Test artifacts
+coverage/
+playwright-report/
+test-results/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Misc secrets folder
+secrets/
