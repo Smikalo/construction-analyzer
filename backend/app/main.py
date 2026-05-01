@@ -23,6 +23,8 @@ from app.agent.llm import get_llm
 from app.api import chat, health, ingest, threads
 from app.config import Settings, get_settings
 from app.kb.base import KnowledgeBase
+from app.services.document_analysis import DocumentAnalyzer, build_document_analyzer
+from app.services.document_registry import DocumentRegistry, lifespan_document_registry
 
 
 @dataclass
@@ -31,7 +33,9 @@ class AppState:
     llm: BaseChatModel
     kb: KnowledgeBase
     checkpointer: BaseCheckpointSaver
+    registry: DocumentRegistry
     graph: Any  # CompiledStateGraph; not exposed in stable types
+    document_analyzer: DocumentAnalyzer | None = None
 
 
 def build_app_state(
@@ -39,15 +43,19 @@ def build_app_state(
     llm: BaseChatModel,
     kb: KnowledgeBase,
     checkpointer: BaseCheckpointSaver,
+    registry: DocumentRegistry,
     graph: Any,
     settings: Settings | None = None,
+    document_analyzer: DocumentAnalyzer | None = None,
 ) -> AppState:
     return AppState(
         settings=settings or get_settings(),
         llm=llm,
         kb=kb,
         checkpointer=checkpointer,
+        registry=registry,
         graph=graph,
+        document_analyzer=document_analyzer,
     )
 
 
@@ -72,17 +80,21 @@ async def _production_lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     llm = get_llm(settings)
     kb = _build_kb(settings)
+    document_analyzer = build_document_analyzer(settings)
 
     async with lifespan_checkpointer(settings.checkpoint_db_path) as checkpointer:
-        graph = build_graph(llm=llm, kb=kb, checkpointer=checkpointer)
-        app.state.app_state = build_app_state(
-            llm=llm,
-            kb=kb,
-            checkpointer=checkpointer,
-            graph=graph,
-            settings=settings,
-        )
-        yield
+        async with lifespan_document_registry(settings.registry_db_path) as registry:
+            graph = build_graph(llm=llm, kb=kb, checkpointer=checkpointer)
+            app.state.app_state = build_app_state(
+                llm=llm,
+                kb=kb,
+                checkpointer=checkpointer,
+                registry=registry,
+                graph=graph,
+                settings=settings,
+                document_analyzer=document_analyzer,
+            )
+            yield
 
 
 def build_app(*, state: AppState | None = None) -> FastAPI:

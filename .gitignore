@@ -55,3 +55,25 @@ Thumbs.db
 
 # Misc secrets folder
 secrets/
+.omx/
+
+# Local agent documentation overlays
+AGENTS.md
+CLAUDE.md
+.github/instructions/*.instructions.md
+.github/skills/*/SKILL.md
+.agents/skills/*/SKILL.md
+.claude/skills/*/SKILL.md
+backend/uv.lock
+.mcp.json
+.gsd
+.github
+.gsd-id
+.bg-shell/
+*~
+*.code-workspace
+target/
+vendor/
+*.log
+.cache/
+tmp/

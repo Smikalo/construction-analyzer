@@ -7,6 +7,7 @@ sync test pins the JSON shape and the SSE test pins the framing on the wire.
 from __future__ import annotations
 
 import json
+from contextlib import AsyncExitStack
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,6 +17,7 @@ from app.agent.checkpointer import lifespan_checkpointer
 from app.agent.graph import build_graph
 from app.kb.fake import FakeKB
 from app.main import build_app, build_app_state
+from app.services.document_registry import lifespan_document_registry
 from tests._fakes import scripted_chat
 
 
@@ -26,12 +28,19 @@ def make_client():
     async def _build(responses: list[AIMessage]):
         kb = FakeKB()
         llm = scripted_chat(responses)
-        cm = lifespan_checkpointer(":memory:")
-        checkpointer = await cm.__aenter__()
+        stack = AsyncExitStack()
+        checkpointer = await stack.enter_async_context(lifespan_checkpointer(":memory:"))
+        registry = await stack.enter_async_context(lifespan_document_registry(":memory:"))
         graph = build_graph(llm=llm, kb=kb, checkpointer=checkpointer)
-        state = build_app_state(llm=llm, kb=kb, checkpointer=checkpointer, graph=graph)
+        state = build_app_state(
+            llm=llm,
+            kb=kb,
+            checkpointer=checkpointer,
+            registry=registry,
+            graph=graph,
+        )
         app = build_app(state=state)
-        return TestClient(app), cm, kb
+        return TestClient(app), stack, kb
 
     yield _build
 

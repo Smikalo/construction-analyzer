@@ -1,0 +1,23 @@
+repos:
+  - repo: local
+    hooks:
+      - id: backend-ruff-format
+        name: backend ruff format check
+        language: system
+        entry: uv --directory backend run ruff format --check app tests
+        files: ^backend/.*\.py$
+        pass_filenames: false
+
+      - id: backend-ruff-check
+        name: backend ruff lint
+        language: system
+        entry: uv --directory backend run ruff check app tests
+        files: ^backend/.*\.py$
+        pass_filenames: false
+
+      - id: backend-mypy
+        name: backend mypy
+        language: system
+        entry: uv --directory backend run mypy app
+        files: ^backend/app/.*\.py$
+        pass_filenames: false

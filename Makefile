@@ -89,4 +89,4 @@ clean:
 	$(COMPOSE) down -v --remove-orphans
 
 clean-data:
-	rm -rf backend/data/documents/* backend/data/checkpoints.sqlite*
+	rm -rf backend/data/documents/* backend/data/checkpoints.sqlite* backend/data/registry.sqlite*

@@ -1,17 +1,77 @@
 # construction-analyzer
 
-A modular, test-driven hackathon scaffold pairing an immersive ChatGPT-style frontend with a LangGraph-powered FastAPI backend. The agent uses [MemoryPalace](https://github.com/jeffpierce/memory-palace) (PostgreSQL + pgvector + Ollama) as its long-term knowledge base, with a SQLite-backed LangGraph checkpointer for persistent conversation history.
+A modular, test-driven hackathon scaffold pairing an IDE-style Next.js shell with a LangGraph-powered FastAPI backend. Uploaded documents flow through a registry-backed ingestion pipeline into [MemoryPalace](https://github.com/jeffpierce/memory-palace) (PostgreSQL + pgvector + Ollama), while SQLite-backed registry and checkpoint state keep uploads and conversations durable.
 
 ```
-┌─────────────────────────── construction-analyzer-net ────────────────────────────┐
-│                                                                                  │
-│   frontend          backend                  postgres + pgvector     ollama      │
-│   Next.js 15  ─►   FastAPI + LangGraph  ─►   memory_palace DB        :11434      │
-│   :3000                :8000                 :5432                                │
-│                          │                                                       │
-│                          ├─► AsyncSqliteSaver  (thread history, sqlite file)     │
-│                          └─► MemoryPalaceKB    (Postgres + Ollama embeddings)    │
-└──────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────── construction-analyzer ──────────────────────────────┐
+│ Frontend shell → FastAPI backend → MemoryPalace + SQLite state                     │
+│ onboarding · file tree · graph · preview · chat · profile · settings               │
+│ /api/chat · /api/chat/sync · /api/ingest · /api/threads · /health · /ready         │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Service Architecture
+
+These diagrams reflect the code in the repository today: the browser shell sends
+uploads and chat messages to FastAPI; the ingest pipeline turns documents into
+typed elements and stores them in MemoryPalace; chat runs through LangGraph and
+checkpoints thread history in SQLite.
+
+### Current Architecture
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│ Frontend shell                                                                       │
+│ onboarding · file tree · graph · preview · chat · profile · settings                 │
+├───────────────────────────────┬──────────────────────────────────────────────────────┤
+│ FastAPI backend               │ Persistence and services                             │
+│ /api/chat                     │ document registry (SQLite)                           │
+│ /api/chat/sync                │ thread checkpointer (SQLite)                         │
+│ /api/ingest                   │ MemoryPalace KB (PostgreSQL + pgvector + Ollama)     │
+│ /api/threads                  │ raw uploads                                           │
+│ /health · /ready              │ optional visual analysis for figure-like elements    │
+│ LangGraph agent + KB tools    │                                                       │
+│ ingestion pipeline            │                                                       │
+└───────────────────────────────┴──────────────────────────────────────────────────────┘
+```
+
+### Ingestion Flow
+
+```text
+User uploads a PDF, Markdown file, or plain text
+        |
+        v
+Upload validation, hashing, and registry deduplication
+        |
+        v
+Document parser turns files into typed elements
+        |
+        v
+Optional visual-only enrichment for chart, diagram, drawing, and image elements
+        |
+        v
+Elements are chunked with provenance and stored in MemoryPalace
+        |
+        v
+Registry status is updated to indexed or failed
+```
+
+### Chat and Thread Flow
+
+```text
+User sends a message
+        |
+        v
+Frontend calls /api/chat or /api/chat/sync
+        |
+        v
+LangGraph injects the system prompt and invokes kb_recall / kb_remember
+        |
+        v
+Streaming tokens and tool events return to the browser
+        |
+        v
+Thread state is checkpointed in SQLite and histories are replayed through /api/threads/{id}/history
 ```
 
 ## Stack
@@ -21,7 +81,7 @@ A modular, test-driven hackathon scaffold pairing an immersive ChatGPT-style fro
 | Frontend | Next.js 14 (App Router) · TypeScript · Tailwind · Framer Motion · Zustand · `react-markdown` |
 | Backend | FastAPI · LangGraph · LangChain · pydantic-settings · sse-starlette |
 | Knowledge base | MemoryPalace (in-process Python library) backed by **PostgreSQL 16 + pgvector** and **Ollama** for embeddings |
-| Thread persistence | LangGraph `AsyncSqliteSaver` at `backend/data/checkpoints.sqlite` |
+| Thread persistence | LangGraph `AsyncSqliteSaver` (SQLite) |
 | Orchestration | Docker Compose (4 services, named volumes, healthchecks, dependency-ordered startup) |
 | Tests | pytest + httpx + respx (backend) · Vitest + RTL + MSW (frontend) · Playwright (e2e) · bash smoke script |
 

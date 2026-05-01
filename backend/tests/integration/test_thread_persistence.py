@@ -7,6 +7,8 @@ restart).
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
+
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
@@ -15,6 +17,7 @@ from app.agent.checkpointer import lifespan_checkpointer
 from app.agent.graph import build_graph
 from app.kb.fake import FakeKB
 from app.main import build_app, build_app_state
+from app.services.document_registry import lifespan_document_registry
 from tests._fakes import scripted_chat
 
 
@@ -28,16 +31,23 @@ async def shared_client_and_state():
             AIMessage(content="third reply"),
         ]
     )
-    cm = lifespan_checkpointer(":memory:")
-    checkpointer = await cm.__aenter__()
+    stack = AsyncExitStack()
+    checkpointer = await stack.enter_async_context(lifespan_checkpointer(":memory:"))
+    registry = await stack.enter_async_context(lifespan_document_registry(":memory:"))
     graph = build_graph(llm=llm, kb=kb, checkpointer=checkpointer)
-    state = build_app_state(llm=llm, kb=kb, checkpointer=checkpointer, graph=graph)
+    state = build_app_state(
+        llm=llm,
+        kb=kb,
+        checkpointer=checkpointer,
+        registry=registry,
+        graph=graph,
+    )
     app = build_app(state=state)
     try:
         with TestClient(app) as c:
             yield c, graph
     finally:
-        await cm.__aexit__(None, None, None)
+        await stack.aclose()
 
 
 class TestThreadPersistence:

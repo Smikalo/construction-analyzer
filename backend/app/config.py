@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
 
+    # Optional visual-only document analysis
+    document_analysis_enabled: bool = False
+    document_analysis_mode: Literal["visual_only"] = "visual_only"
+    document_analysis_api_key: str = ""
+    document_analysis_model: str = "gpt-4o-mini"
+
     ollama_host: str = "http://ollama:11434"
     ollama_model: str = "qwen3:1.7b"
 
@@ -36,6 +42,8 @@ class Settings(BaseSettings):
 
     # Document ingestion
     documents_dir: str = "/app/data/documents"
+    registry_db_path: str = "/app/data/registry.sqlite"
+    max_upload_bytes: int = 25_000_000
 
     # Knowledge base backend selector: "fake" (tests/dev) or "memorypalace"
     kb_backend: Literal["fake", "memorypalace"] = "fake"

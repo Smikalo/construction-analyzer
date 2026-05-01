@@ -21,6 +21,7 @@ from app.agent.graph import build_graph
 from app.config import reset_settings_for_tests
 from app.kb.fake import FakeKB
 from app.main import build_app, build_app_state
+from app.services.document_registry import lifespan_document_registry
 from tests._fakes import ScriptedChatModel, scripted_chat
 
 
@@ -55,15 +56,17 @@ async def app_with_fakes(fake_kb: FakeKB, scripted_llm_factory) -> AsyncIterator
         [AIMessage(content="ok")] * 32  # plenty for any single test
     )
     async with lifespan_checkpointer(":memory:") as checkpointer:
-        graph = build_graph(llm=default_llm, kb=fake_kb, checkpointer=checkpointer)
-        state = build_app_state(
-            llm=default_llm,
-            kb=fake_kb,
-            checkpointer=checkpointer,
-            graph=graph,
-        )
-        app = build_app(state=state)
-        yield app
+        async with lifespan_document_registry(":memory:") as registry:
+            graph = build_graph(llm=default_llm, kb=fake_kb, checkpointer=checkpointer)
+            state = build_app_state(
+                llm=default_llm,
+                kb=fake_kb,
+                checkpointer=checkpointer,
+                registry=registry,
+                graph=graph,
+            )
+            app = build_app(state=state)
+            yield app
 
 
 @pytest_asyncio.fixture
