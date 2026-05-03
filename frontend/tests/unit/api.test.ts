@@ -12,6 +12,7 @@ import {
   getReportSession,
   ingestFiles,
   listThreads,
+  reportExportDownloadUrl,
   streamChat,
   streamReportSession,
 } from "@/lib/api";
@@ -166,6 +167,17 @@ describe("REST API client", () => {
     const response = await getReportSession("report-123");
     expect(response.session.session_id).toBe("report-123");
     expect(response.current_stage).toBe("bootstrap");
+  });
+
+  it("builds encoded report export download URLs from ids", () => {
+    expect(
+      reportExportDownloadUrl(
+        "report id/with/slash?x=1#frag",
+        "export pdf/1?download=true#now",
+      ),
+    ).toBe(
+      `${BACKEND}/api/reports/report%20id%2Fwith%2Fslash%3Fx%3D1%23frag/exports/export%20pdf%2F1%3Fdownload%3Dtrue%23now/download`,
+    );
   });
 
   it("answerReportGate posts the answer payload", async () => {

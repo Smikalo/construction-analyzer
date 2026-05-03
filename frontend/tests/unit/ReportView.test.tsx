@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 
 import { ReportView } from "@/components/report/ReportView";
 import { useChatStore } from "@/lib/store";
@@ -153,9 +153,136 @@ describe("ReportView", () => {
     expect(screen.getByText("W001")).toBeInTheDocument();
     expect(screen.getByText("B007")).toBeInTheDocument();
 
-    expect(screen.getByTestId("report-export-export-1")).toHaveTextContent("pdf");
-    expect(screen.getByTestId("report-export-export-1")).toHaveTextContent("pending");
-    expect(screen.getByTestId("report-export-export-1")).toHaveTextContent(/report\.pdf/);
+    const pendingExport = screen.getByTestId("report-export-export-1");
+    expect(pendingExport).toHaveTextContent("pdf");
+    expect(pendingExport).toHaveTextContent("pending");
+    expect(pendingExport).toHaveTextContent(/report\.pdf/);
+    expect(within(pendingExport).queryByRole("link", { name: /download pdf/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/\/private\/tmp\/report\.pdf/)).not.toBeInTheDocument();
+  });
+
+  it("renders a ready PDF download link with basename-only text and encoded ids", () => {
+    useChatStore.setState({
+      activeReportId: "report 17/unsafe",
+      activeView: "report",
+      reportStatus: "complete",
+      exports: [
+        {
+          export_id: "export 1/final",
+          session_id: "report 17/unsafe",
+          status: "ready",
+          format: "PDF",
+          output_path: "C:\\private\\reports\\report-final.pdf",
+          diagnostics: { pages: 4 },
+          created_at: "2024-01-01T09:06:00Z",
+          completed_at: "2024-01-01T09:07:00Z",
+        },
+      ],
+    } as never);
+
+    render(<ReportView />);
+
+    const exportCard = screen.getByTestId("report-export-export 1/final");
+    expect(exportCard).toHaveTextContent("Output path: report-final.pdf");
+    expect(screen.queryByText(/C:\\private\\reports\\report-final\.pdf/)).not.toBeInTheDocument();
+
+    const link = within(exportCard).getByRole("link", {
+      name: "Download PDF report-final.pdf",
+    });
+    expect(link).toHaveTextContent("Download PDF");
+    expect(link).toHaveAttribute(
+      "href",
+      "http://localhost:8000/api/reports/report%2017%2Funsafe/exports/export%201%2Ffinal/download",
+    );
+    expect(link.getAttribute("href")).not.toContain("report-final.pdf");
+    expect(link.getAttribute("href")).not.toContain("private");
+  });
+
+  it("suppresses download links for unavailable exports", () => {
+    useChatStore.setState({
+      activeReportId: "report-17",
+      activeView: "report",
+      reportStatus: "complete",
+      exports: [
+        {
+          export_id: "export-pending",
+          session_id: "report-17",
+          status: "pending",
+          format: "pdf",
+          output_path: "/private/tmp/pending.pdf",
+          diagnostics: {},
+          created_at: "2024-01-01T09:06:00Z",
+          completed_at: null,
+        },
+        {
+          export_id: "export-failed",
+          session_id: "report-17",
+          status: "failed",
+          format: "pdf",
+          output_path: "/private/tmp/failed.pdf",
+          diagnostics: { error: "synthetic failure" },
+          created_at: "2024-01-01T09:06:00Z",
+          completed_at: null,
+        },
+        {
+          export_id: "export-docx",
+          session_id: "report-17",
+          status: "ready",
+          format: "docx",
+          output_path: "/private/tmp/report.docx",
+          diagnostics: {},
+          created_at: "2024-01-01T09:06:00Z",
+          completed_at: "2024-01-01T09:07:00Z",
+        },
+        {
+          export_id: "export-no-path",
+          session_id: "report-17",
+          status: "ready",
+          format: "pdf",
+          output_path: null,
+          diagnostics: {},
+          created_at: "2024-01-01T09:06:00Z",
+          completed_at: "2024-01-01T09:07:00Z",
+        },
+      ],
+    } as never);
+
+    render(<ReportView />);
+
+    expect(screen.queryAllByRole("link", { name: /download pdf/i })).toHaveLength(0);
+    expect(screen.getByTestId("report-export-export-pending")).toHaveTextContent("pending");
+    expect(screen.getByTestId("report-export-export-failed")).toHaveTextContent("failed");
+    expect(screen.getByTestId("report-export-export-docx")).toHaveTextContent("docx");
+    expect(screen.getByTestId("report-export-export-no-path")).toHaveTextContent(
+      "Output path: pending",
+    );
+    expect(screen.queryByText(/\/private\/tmp\//)).not.toBeInTheDocument();
+  });
+
+  it("suppresses ready PDF download links when there is no active report id", () => {
+    useChatStore.setState({
+      activeReportId: null,
+      activeView: "report",
+      reportStatus: "complete",
+      exports: [
+        {
+          export_id: "export-ready",
+          session_id: "report-17",
+          status: "ready",
+          format: "pdf",
+          output_path: "/private/tmp/report-ready.pdf",
+          diagnostics: {},
+          created_at: "2024-01-01T09:06:00Z",
+          completed_at: "2024-01-01T09:07:00Z",
+        },
+      ],
+    } as never);
+
+    render(<ReportView />);
+
+    const exportCard = screen.getByTestId("report-export-export-ready");
+    expect(exportCard).toHaveTextContent("Output path: report-ready.pdf");
+    expect(within(exportCard).queryByRole("link", { name: /download pdf/i })).not.toBeInTheDocument();
   });
 
   it("renders empty-state hints when report data has not arrived yet", () => {

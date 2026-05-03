@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import { motion } from "framer-motion";
+import { reportExportDownloadUrl } from "@/lib/api";
 import { useChatStore } from "@/lib/store";
 import type {
   ReportArtifact,
@@ -368,6 +369,16 @@ export function ReportView() {
                 <ul className="mt-3 space-y-2">
                   {exports.map((reportExport: ReportExport) => {
                     const outputPath = summarizeOutputPath(reportExport.output_path);
+                    const canDownloadPdf = Boolean(
+                      activeReportId &&
+                        outputPath &&
+                        reportExport.status === "ready" &&
+                        reportExport.format.toLowerCase() === "pdf",
+                    );
+                    const downloadLabel = outputPath
+                      ? `Download PDF ${outputPath}`
+                      : `Download PDF ${reportExport.export_id}`;
+
                     return (
                       <li
                         key={reportExport.export_id}
@@ -382,6 +393,18 @@ export function ReportView() {
                             <div className="mt-1 text-[11px] text-brand-subtle">
                               {outputPath ? `Output path: ${outputPath}` : "Output path: pending"}
                             </div>
+                            {canDownloadPdf && activeReportId ? (
+                              <a
+                                href={reportExportDownloadUrl(
+                                  activeReportId,
+                                  reportExport.export_id,
+                                )}
+                                aria-label={downloadLabel}
+                                className="mt-2 inline-flex min-h-9 items-center rounded-full border border-brand-blue bg-brand-blue-soft px-3 text-[11.5px] font-medium text-brand-blue transition-colors hover:bg-white focus:outline-none focus:ring-2 focus:ring-brand-blue focus:ring-offset-2"
+                              >
+                                Download PDF
+                              </a>
+                            ) : null}
                           </div>
                           <span className={badgeClassName(reportExport.status === "ready" ? "complete" : reportExport.status === "failed" ? "failed" : "pending")}>{reportExport.status}</span>
                         </div>

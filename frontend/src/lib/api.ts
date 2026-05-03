@@ -102,6 +102,17 @@ export async function getReportSession(
   );
 }
 
+export function reportExportDownloadUrl(
+  sessionId: string,
+  exportId: string,
+): string {
+  return url(
+    `/api/reports/${encodeURIComponent(sessionId)}/exports/${encodeURIComponent(
+      exportId,
+    )}/download`,
+  );
+}
+
 export async function answerReportGate(
   sessionId: string,
   gateId: string,
