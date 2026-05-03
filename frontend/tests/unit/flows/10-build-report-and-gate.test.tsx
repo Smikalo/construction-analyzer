@@ -77,7 +77,69 @@ describe("Build Report flow", () => {
       });
     });
 
-    apiMocks.answerReportGate.mockResolvedValue(undefined);
+    let gateAnswered = false;
+    apiMocks.answerReportGate.mockImplementation(async () => {
+      gateAnswered = true;
+    });
+    apiMocks.getReportSession.mockImplementation(async () => ({
+      session: {
+        session_id: "report-123",
+        status: gateAnswered ? "complete" : "blocked",
+        current_stage: "bootstrap",
+        created_at: "2024-01-01T00:00:00Z",
+        updated_at: "2024-01-01T00:00:03Z",
+        last_error: null,
+        metadata: {},
+      },
+      current_stage: "bootstrap",
+      stages: [
+        {
+          stage_id: "stage-bootstrap",
+          session_id: "report-123",
+          name: "bootstrap",
+          status: gateAnswered ? "complete" : "active",
+          started_at: "2024-01-01T00:00:00Z",
+          completed_at: gateAnswered ? "2024-01-01T00:00:03Z" : null,
+          summary: gateAnswered ? "Template accepted" : null,
+          error: null,
+        },
+      ],
+      gates: gateAnswered
+        ? []
+        : [
+            {
+              gate_id: "template_confirmation",
+              session_id: "report-123",
+              stage_id: "stage-bootstrap",
+              status: "open",
+              question: {
+                question_id: "template_confirmation",
+                label: "Confirm the report template for this session.",
+                options: [
+                  { value: "general_project_dossier", label: "General project dossier" },
+                  { value: "site_safety_packet", label: "Site safety packet" },
+                ],
+              },
+              answer: {},
+              created_at: "2024-01-01T00:00:01Z",
+              closed_at: null,
+            },
+          ],
+      artifacts: [],
+      validation_findings: [],
+      exports: [],
+      recent_logs: [
+        {
+          log_id: "log-bootstrap-started",
+          session_id: "report-123",
+          stage_id: "stage-bootstrap",
+          level: "info",
+          message: "Report bootstrap stage started",
+          payload: { stage_name: "bootstrap" },
+          created_at: "2024-01-01T00:00:00Z",
+        },
+      ],
+    }));
   });
 
   it("launches a report session, renders streamed cards and gates, and submits the gate answer", async () => {

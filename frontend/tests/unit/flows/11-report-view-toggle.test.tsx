@@ -75,6 +75,60 @@ describe("Report workspace toggle flow", () => {
     });
 
     apiMocks.answerReportGate.mockResolvedValue(undefined);
+    apiMocks.getReportSession.mockResolvedValue({
+      session: {
+        session_id: "report-123",
+        status: "blocked",
+        current_stage: "inventory",
+        created_at: "2024-01-01T09:00:00Z",
+        updated_at: "2024-01-01T09:01:00Z",
+        last_error: null,
+        metadata: {},
+      },
+      current_stage: "inventory",
+      stages: [
+        {
+          stage_id: "stage-inventory",
+          session_id: "report-123",
+          name: "Inventory",
+          status: "active",
+          started_at: "2024-01-01T09:00:00Z",
+          completed_at: null,
+          summary: null,
+          error: null,
+        },
+      ],
+      gates: [
+        {
+          gate_id: "gate-1",
+          session_id: "report-123",
+          stage_id: "stage-inventory",
+          status: "open",
+          question: {
+            question_id: "gate-1",
+            label: "Review the next section",
+            options: [{ value: "continue", label: "Continue" }],
+          },
+          answer: {},
+          created_at: "2024-01-01T09:01:00Z",
+          closed_at: null,
+        },
+      ],
+      artifacts: [],
+      validation_findings: [],
+      exports: [],
+      recent_logs: [
+        {
+          log_id: "log-inventory-started",
+          session_id: "report-123",
+          stage_id: "stage-inventory",
+          level: "info",
+          message: "Report Inventory stage started",
+          payload: { stage_name: "Inventory" },
+          created_at: "2024-01-01T09:00:00Z",
+        },
+      ],
+    });
   });
 
   it("swaps between graph and report workspaces from the chat launch and activity bar controls", async () => {

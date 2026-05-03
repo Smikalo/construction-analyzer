@@ -207,9 +207,23 @@ function persistReportId(reportId: string): void {
   window.localStorage.setItem(REPORT_STORAGE_KEY, reportId);
 }
 
+const MAX_REPORT_ERROR_LENGTH = 240;
+
 function normalizeReportError(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return typeof error === "string" ? error : "Unknown report error";
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "Unknown report error";
+  const normalized = message.replace(/\s+/g, " ").trim() || "Unknown report error";
+  return normalized.length > MAX_REPORT_ERROR_LENGTH
+    ? `${normalized.slice(0, MAX_REPORT_ERROR_LENGTH - 1)}…`
+    : normalized;
+}
+
+function normalizeNullableReportError(error: string | null): string | null {
+  return error ? normalizeReportError(error) : null;
 }
 
 function readTextField(value: unknown): string | null {
@@ -222,16 +236,54 @@ function formatReportLabel(name: string): string {
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
+function asJsonObject(value: unknown): JsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as JsonObject)
+    : {};
+}
+
+function inspectionStages(snapshot: ReportSessionInspectionResponse): ReportStage[] {
+  return Array.isArray(snapshot.stages) ? snapshot.stages : [];
+}
+
+function inspectionGates(snapshot: ReportSessionInspectionResponse): ReportGatePayload[] {
+  return Array.isArray(snapshot.gates) ? snapshot.gates : [];
+}
+
+function inspectionArtifacts(snapshot: ReportSessionInspectionResponse): ReportArtifact[] {
+  return Array.isArray(snapshot.artifacts) ? snapshot.artifacts : [];
+}
+
+function inspectionValidationFindings(
+  snapshot: ReportSessionInspectionResponse,
+): ReportValidationFinding[] {
+  return Array.isArray(snapshot.validation_findings)
+    ? snapshot.validation_findings
+    : [];
+}
+
+function inspectionExports(snapshot: ReportSessionInspectionResponse): ReportExport[] {
+  return Array.isArray(snapshot.exports) ? snapshot.exports : [];
+}
+
+function inspectionLogs(
+  snapshot: ReportSessionInspectionResponse,
+): ReportSessionInspectionResponse["recent_logs"] {
+  return Array.isArray(snapshot.recent_logs) ? snapshot.recent_logs : [];
+}
+
 function buildReportCardsFromInspection(
   snapshot: ReportSessionInspectionResponse,
 ): ReportCardPayload[] {
-  const stageById = new Map(snapshot.stages.map((stage) => [stage.stage_id, stage]));
+  const stages = inspectionStages(snapshot);
+  const stageById = new Map(stages.map((stage) => [stage.stage_id, stage]));
   const cards: ReportCardPayload[] = [];
 
-  for (const log of snapshot.recent_logs) {
+  for (const log of inspectionLogs(snapshot)) {
+    const payload = asJsonObject(log.payload);
     const stage = log.stage_id ? stageById.get(log.stage_id) ?? null : null;
     const stageName =
-      readTextField(log.payload["stage_name"]) ??
+      readTextField(payload["stage_name"]) ??
       stage?.name ??
       snapshot.current_stage ??
       "unknown";
@@ -244,9 +296,9 @@ function buildReportCardsFromInspection(
         stage_name: stageName,
         kind: "failure",
         message:
-          readTextField(log.payload["error"]) ?? snapshot.session.last_error ?? log.message,
+          readTextField(payload["error"]) ?? snapshot.session.last_error ?? log.message,
         created_at: log.created_at,
-        payload: log.payload,
+        payload,
       });
       continue;
     }
@@ -259,7 +311,7 @@ function buildReportCardsFromInspection(
         kind: "stage_started",
         message: `${stageLabel} stage started`,
         created_at: log.created_at,
-        payload: log.payload,
+        payload,
       });
       continue;
     }
@@ -272,7 +324,7 @@ function buildReportCardsFromInspection(
         kind: "stage_completed",
         message: `${stageLabel} stage completed`,
         created_at: log.created_at,
-        payload: log.payload,
+        payload,
       });
       continue;
     }
@@ -285,7 +337,7 @@ function buildReportCardsFromInspection(
         kind: "gate_closed",
         message: log.message.replace(/^Report /, ""),
         created_at: log.created_at,
-        payload: log.payload,
+        payload,
       });
     }
   }
@@ -300,22 +352,88 @@ function buildReportCardsFromInspection(
       stage_id: snapshot.current_stage ?? snapshot.session.session_id,
       stage_name: formatReportLabel(snapshot.current_stage ?? "unknown"),
       kind: "failure",
-      message: snapshot.session.last_error,
+      message: normalizeReportError(snapshot.session.last_error),
       created_at: snapshot.session.updated_at ?? snapshot.session.created_at,
-      payload: { error: snapshot.session.last_error },
+      payload: { error: normalizeReportError(snapshot.session.last_error) },
     });
   }
 
   return cards;
 }
 
-function buildReportSnapshotFromInspection(
+function reportCardKey(card: ReportCardPayload): string {
+  return [card.session_id, card.stage_id, card.kind, card.created_at].join("::");
+}
+
+function reportCardTimestamp(card: ReportCardPayload): number {
+  const time = new Date(card.created_at).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function mergeReportCards(
+  existingCards: ReportCardPayload[],
+  snapshotCards: ReportCardPayload[],
+  sessionId: string,
+): ReportCardPayload[] {
+  const indexed = new Map<string, { card: ReportCardPayload; order: number }>();
+  let order = 0;
+
+  for (const card of snapshotCards) {
+    indexed.set(reportCardKey(card), { card, order });
+    order += 1;
+  }
+
+  for (const card of existingCards) {
+    if (card.session_id !== sessionId) continue;
+    const key = reportCardKey(card);
+    if (!indexed.has(key)) {
+      indexed.set(key, { card, order });
+      order += 1;
+    }
+  }
+
+  return Array.from(indexed.values())
+    .sort((a, b) =>
+      reportCardTimestamp(a.card) - reportCardTimestamp(b.card) || a.order - b.order,
+    )
+    .map((entry) => entry.card);
+}
+
+function buildReportStateFromInspection(
   snapshot: ReportSessionInspectionResponse,
-): { reportCards: ReportCardPayload[]; currentGate: ReportGatePayload | null } {
+  existingCards: ReportCardPayload[] = [],
+): Pick<
+  State,
+  | "activeReportId"
+  | "reportStatus"
+  | "reportCards"
+  | "currentGate"
+  | "stages"
+  | "artifacts"
+  | "validationFindings"
+  | "exports"
+  | "reportError"
+> {
+  const snapshotCards = buildReportCardsFromInspection(snapshot);
+  const sessionId = snapshot.session.session_id;
+
   return {
-    reportCards: buildReportCardsFromInspection(snapshot),
-    currentGate: snapshot.gates.find((gate) => gate.status === "open") ?? null,
+    activeReportId: sessionId,
+    reportStatus: snapshot.session.status,
+    reportCards: mergeReportCards(existingCards, snapshotCards, sessionId),
+    currentGate: inspectionGates(snapshot).find((gate) => gate.status === "open") ?? null,
+    stages: inspectionStages(snapshot),
+    artifacts: inspectionArtifacts(snapshot),
+    validationFindings: inspectionValidationFindings(snapshot),
+    exports: inspectionExports(snapshot),
+    reportError: normalizeNullableReportError(snapshot.session.last_error),
   };
+}
+
+function shouldRefreshAfterReportCard(card: ReportCardPayload): boolean {
+  return ["stage_completed", "stage_failed", "gate_closed", "failure"].includes(
+    card.kind,
+  );
 }
 
 function findEdgeIdsBetween(edges: GraphEdge[], nodeIds: string[]): string[] {
@@ -325,8 +443,33 @@ function findEdgeIdsBetween(edges: GraphEdge[], nodeIds: string[]): string[] {
     .map((e) => e.id);
 }
 
-export const useChatStore = create<State & Actions>((set, get) => ({
-  ...INITIAL,
+export const useChatStore = create<State & Actions>((set, get) => {
+  const applyReportInspectionSnapshot = (
+    inspection: ReportSessionInspectionResponse,
+  ): void => {
+    const update = buildReportStateFromInspection(
+      inspection,
+      get().reportCards,
+    );
+    set(update);
+    persistReportId(inspection.session.session_id);
+  };
+
+  const refreshReportInspection = async (
+    sessionId: string,
+  ): Promise<ReportSessionInspectionResponse | null> => {
+    try {
+      const inspection = await getReportSession(sessionId);
+      applyReportInspectionSnapshot(inspection);
+      return inspection;
+    } catch (error) {
+      set({ reportError: normalizeReportError(error) });
+      return null;
+    }
+  };
+
+  return {
+    ...INITIAL,
 
   reset: () => set({ ...INITIAL }),
 
@@ -381,6 +524,8 @@ export const useChatStore = create<State & Actions>((set, get) => ({
         : {}),
     });
 
+    void refreshReportInspection(launch.session_id);
+
     void streamReportSession(launch.session_id, {
       onReportCard: (card) => {
         set((state) => {
@@ -396,16 +541,23 @@ export const useChatStore = create<State & Actions>((set, get) => ({
             next.reportStatus = state.currentGate ? "blocked" : "active";
           } else if (card.kind === "stage_failed" || card.kind === "failure") {
             next.reportStatus = "failed";
-            next.reportError = card.message;
+            next.reportError = normalizeReportError(card.message);
           }
           return next;
         });
+        if (shouldRefreshAfterReportCard(card)) {
+          void refreshReportInspection(launch.session_id);
+        }
       },
       onReportGate: (gate) => {
         set({ currentGate: gate, reportStatus: "blocked", reportError: null });
+        void refreshReportInspection(launch.session_id);
       },
       onError: (message) => {
-        set({ reportError: message, reportStatus: "failed" });
+        set({ reportError: normalizeReportError(message), reportStatus: "failed" });
+      },
+      onDone: () => {
+        void refreshReportInspection(launch.session_id);
       },
     }).catch((error) => {
       set({ reportError: normalizeReportError(error), reportStatus: "failed" });
@@ -422,9 +574,11 @@ export const useChatStore = create<State & Actions>((set, get) => ({
       return;
     }
 
-    set({ currentGate: null, reportError: null });
+    set({ reportError: null });
     try {
       await answerReportGate(activeReportId, gate.gate_id, answer);
+      set({ currentGate: null, reportError: null });
+      await refreshReportInspection(activeReportId);
     } catch (error) {
       set({ currentGate: gate, reportError: normalizeReportError(error) });
       throw error;
@@ -437,20 +591,8 @@ export const useChatStore = create<State & Actions>((set, get) => ({
 
     try {
       const inspection = await getReportSession(storedReportId);
-      const snapshot = buildReportSnapshotFromInspection(inspection);
-      set({
-        activeReportId: inspection.session.session_id,
-        activeView: "report",
-        reportStatus: inspection.session.status,
-        reportCards: snapshot.reportCards,
-        currentGate: snapshot.currentGate,
-        stages: inspection.stages,
-        artifacts: inspection.artifacts,
-        validationFindings: inspection.validation_findings,
-        exports: inspection.exports,
-        reportError: inspection.session.last_error,
-      });
-      persistReportId(inspection.session.session_id);
+      applyReportInspectionSnapshot(inspection);
+      set({ activeView: "report" });
     } catch (error) {
       set({ reportError: normalizeReportError(error) });
       throw error;
@@ -635,4 +777,5 @@ export const useChatStore = create<State & Actions>((set, get) => ({
   setProfileOpen: (open) => set({ profileOpen: open }),
   setSettingsOpen: (open) => set({ settingsOpen: open }),
   setSettingsTab: (tab) => set({ settingsTab: tab }),
-}));
+  };
+});
