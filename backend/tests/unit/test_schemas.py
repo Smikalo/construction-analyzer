@@ -16,10 +16,15 @@ from app.schemas import (
     Message,
     ReadinessStatus,
     ReportArtifact,
+    ReportCardPayload,
     ReportExport,
     ReportGate,
+    ReportGateAnswerRequest,
+    ReportGatePayload,
     ReportLog,
     ReportSession,
+    ReportSessionLaunchRequest,
+    ReportSessionLaunchResponse,
     ReportStage,
     ReportValidationFinding,
     ThreadHistory,
@@ -50,7 +55,22 @@ class TestChatChunk:
     def test_token_chunk_round_trip(self) -> None:
         chunk = ChatChunk(type="token", data="hello")
         as_dict = chunk.model_dump()
-        assert as_dict == {"type": "token", "data": "hello"}
+        assert as_dict == {"type": "token", "data": "hello", "payload": {}}
+
+    def test_report_chunk_round_trip(self) -> None:
+        chunk = ChatChunk(
+            type="report_card",
+            data="stage started",
+            payload={"session_id": "session-1", "stage_id": "stage-1"},
+        )
+
+        assert ChatChunk.model_validate(chunk.model_dump()) == chunk
+
+    def test_payload_defaults_to_empty_dict_when_omitted(self) -> None:
+        chunk = ChatChunk(type="report_gate", data="gate opened")
+
+        assert chunk.payload == {}
+        assert chunk.model_dump()["payload"] == {}
 
     def test_done_chunk(self) -> None:
         chunk = ChatChunk(type="done", data="")
@@ -178,6 +198,38 @@ class TestReportSchemas:
                     "answer": {},
                     "created_at": "2026-05-03T00:00:02Z",
                     "closed_at": None,
+                },
+            ),
+            (
+                ReportCardPayload,
+                {
+                    "session_id": "session-1",
+                    "stage_id": "stage-1",
+                    "stage_name": "drafting",
+                    "kind": "stage_started",
+                    "message": "Stage started",
+                    "created_at": "2026-05-03T00:00:02Z",
+                    "payload": {"progress": 0.25},
+                },
+            ),
+            (
+                ReportGatePayload,
+                {
+                    "session_id": "session-1",
+                    "gate_id": "gate-1",
+                    "stage_id": "stage-1",
+                    "question": {"prompt": "Proceed?"},
+                    "status": "open",
+                    "created_at": "2026-05-03T00:00:02Z",
+                },
+            ),
+            (
+                ReportSessionLaunchResponse,
+                {
+                    "session_id": "session-1",
+                    "status": "active",
+                    "current_stage": "drafting",
+                    "resumed": True,
                 },
             ),
             (
@@ -335,6 +387,15 @@ class TestReportSchemas:
             format="pdf",
             created_at="2026-05-03T00:00:04Z",
         )
+        card = ReportCardPayload(
+            session_id="session-1",
+            stage_id="stage-1",
+            stage_name="drafting",
+            kind="stage_completed",
+            message="Stage completed",
+            created_at="2026-05-03T00:00:05Z",
+        )
+        launch = ReportSessionLaunchRequest(session_id=None, thread_id=None)
 
         assert session.metadata == {}
         assert gate.question == {}
@@ -342,3 +403,48 @@ class TestReportSchemas:
         assert log.payload == {}
         assert finding.payload == {}
         assert export.diagnostics == {}
+        assert card.payload == {}
+        assert launch.session_id is None
+        assert launch.thread_id is None
+        assert launch.metadata == {}
+
+    @pytest.mark.parametrize(
+        "kind",
+        [
+            "stage_started",
+            "stage_completed",
+            "stage_failed",
+            "gate_opened",
+            "gate_closed",
+            "failure",
+        ],
+    )
+    def test_report_card_accepts_all_kinds(self, kind: str) -> None:
+        card = ReportCardPayload(
+            session_id="session-1",
+            stage_id="stage-1",
+            stage_name="drafting",
+            kind=kind,
+            message="Stage event",
+            created_at="2026-05-03T00:00:05Z",
+            payload={"kind": kind},
+        )
+
+        assert card.kind == kind
+        assert ReportCardPayload.model_validate(card.model_dump()) == card
+
+    def test_report_session_launch_request_accepts_none_ids(self) -> None:
+        request = ReportSessionLaunchRequest(
+            session_id=None,
+            thread_id=None,
+            metadata={"source": "chat"},
+        )
+
+        assert request.session_id is None
+        assert request.thread_id is None
+        assert request.metadata == {"source": "chat"}
+        assert ReportSessionLaunchRequest.model_validate(request.model_dump()) == request
+
+    def test_report_gate_answer_rejects_non_dict_answer(self) -> None:
+        with pytest.raises(ValidationError):
+            ReportGateAnswerRequest(answer="approved")  # type: ignore[arg-type]

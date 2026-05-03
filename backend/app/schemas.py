@@ -10,7 +10,15 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 Role = Literal["user", "assistant", "system", "tool"]
-ChunkType = Literal["token", "tool_call", "tool_result", "error", "done"]
+ChunkType = Literal[
+    "token",
+    "tool_call",
+    "tool_result",
+    "error",
+    "done",
+    "report_card",
+    "report_gate",
+]
 ReportSessionStatus = Literal["pending", "active", "blocked", "complete", "failed"]
 ReportStageStatus = Literal["pending", "active", "complete", "failed"]
 ReportGateStatus = Literal["open", "closed"]
@@ -21,6 +29,14 @@ ReportArtifactKind = Literal[
     "validation_finding",
     "pdf_export",
     "other",
+]
+ReportCardKind = Literal[
+    "stage_started",
+    "stage_completed",
+    "stage_failed",
+    "gate_opened",
+    "gate_closed",
+    "failure",
 ]
 ReportLogLevel = Literal["debug", "info", "warning", "error"]
 ReportValidationSeverity = Literal["info", "warning", "blocker"]
@@ -55,6 +71,12 @@ class ChatChunk(BaseModel):
 
     type: ChunkType
     data: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def _payload_defaults_to_empty_dict(cls, value: Any) -> dict[str, Any]:
+        return _coerce_json_object(value)
 
 
 class ThreadInfo(BaseModel):
@@ -89,6 +111,57 @@ class IngestResponse(BaseModel):
     ingested_files: int
     ingested_chunks: int
     memory_ids: list[str] = Field(default_factory=list)
+
+
+class ReportCardPayload(BaseModel):
+    session_id: str
+    stage_id: str
+    stage_name: str
+    kind: ReportCardKind
+    message: str
+    created_at: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def _payload_defaults_to_empty_dict(cls, value: Any) -> dict[str, Any]:
+        return _coerce_json_object(value)
+
+
+class ReportGatePayload(BaseModel):
+    session_id: str
+    gate_id: str
+    stage_id: str | None = None
+    question: dict[str, Any] = Field(default_factory=dict)
+    status: ReportGateStatus
+    created_at: str
+
+    @field_validator("question", mode="before")
+    @classmethod
+    def _question_defaults_to_empty_dict(cls, value: Any) -> dict[str, Any]:
+        return _coerce_json_object(value)
+
+
+class ReportSessionLaunchRequest(BaseModel):
+    session_id: str | None = None
+    thread_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def _metadata_defaults_to_empty_dict(cls, value: Any) -> dict[str, Any]:
+        return _coerce_json_object(value)
+
+
+class ReportSessionLaunchResponse(BaseModel):
+    session_id: str
+    status: ReportSessionStatus
+    current_stage: str | None = None
+    resumed: bool
+
+
+class ReportGateAnswerRequest(BaseModel):
+    answer: dict[str, Any]
 
 
 class ReportSession(BaseModel):
