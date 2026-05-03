@@ -7,10 +7,16 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.schemas import ChatChunk, ReportCardPayload, ReportGatePayload
+from app.services.document_registry import DocumentRegistry
+from app.services.report_planner import (
+    build_general_project_dossier_section_plan,
+    build_source_inventory,
+)
 from app.services.report_sessions import ReportGateRecord, ReportSessionRecord, ReportSessionStore
 
 BOOTSTRAP_STAGE_NAME = "bootstrap"
-AWAITING_INVENTORY_STAGE_NAME = "awaiting_inventory"
+INVENTORY_SOURCES_STAGE_NAME = "inventory_sources"
+PLAN_REPORT_SECTIONS_STAGE_NAME = "plan_report_sections"
 REPORT_TEMPLATE_CONFIRMATION_GATE_ID = "report_template_confirmation"
 _ALLOWED_GATE_CHOICES = {"general_project_dossier", "cancel"}
 
@@ -47,10 +53,12 @@ class ReportPipeline:
     def __init__(
         self,
         store: ReportSessionStore,
-        registry: ReportPipelineRegistry | None = None,
+        registry: DocumentRegistry,
+        registry_pipeline: ReportPipelineRegistry | None = None,
     ) -> None:
         self._store = store
-        self._registry = registry or ReportPipelineRegistry()
+        self._registry_documents = registry
+        self._registry = registry_pipeline or ReportPipelineRegistry()
 
     def events(self, session_id: str) -> asyncio.Queue[ChatChunk]:
         return self._registry.events(session_id)
@@ -176,12 +184,11 @@ class ReportPipeline:
         if choice not in _ALLOWED_GATE_CHOICES:
             raise ValueError(f"invalid gate choice: {choice}")
 
-        gate_closed = False
-        awaiting_stage = None
-        awaiting_stage_started = False
+        inventory_stage = None
+        plan_stage = None
+        inventory: dict[str, Any] = {}
         try:
             closed_gate = self._store.close_gate(gate.gate_id, answer=answer)
-            gate_closed = True
             self._append_log(
                 normalized_session_id,
                 level="info",
@@ -213,51 +220,195 @@ class ReportPipeline:
                     payload={"gate_id": closed_gate.gate_id, "choice": choice},
                 )
                 return session
-
-            awaiting_stage = self._store.start_stage(
-                normalized_session_id,
-                AWAITING_INVENTORY_STAGE_NAME,
+        except Exception as exc:  # noqa: BLE001
+            self._record_failure(
+                session_id=normalized_session_id,
+                handle=handle,
+                exc=exc,
+                stage_id=None,
+                stage_name=BOOTSTRAP_STAGE_NAME,
+                should_fail_stage=True,
             )
-            awaiting_stage_started = True
-            session = self._store.update_session_status(
+            raise
+
+        try:
+            inventory_stage = self._store.start_stage(
                 normalized_session_id,
-                "active",
-                current_stage=AWAITING_INVENTORY_STAGE_NAME,
+                INVENTORY_SOURCES_STAGE_NAME,
             )
             self._append_log(
                 normalized_session_id,
                 level="info",
-                message="Awaiting inventory stage started",
-                stage_id=awaiting_stage.stage_id,
-                payload={"choice": choice},
+                message="Inventory sources stage started",
+                stage_id=inventory_stage.stage_id,
+                payload={"stage_name": INVENTORY_SOURCES_STAGE_NAME},
             )
             self._emit_card(
                 handle.queue,
                 session_id=normalized_session_id,
-                stage_id=awaiting_stage.stage_id,
-                stage_name=AWAITING_INVENTORY_STAGE_NAME,
+                stage_id=inventory_stage.stage_id,
+                stage_name=INVENTORY_SOURCES_STAGE_NAME,
                 kind="stage_started",
-                message="Awaiting inventory stage started",
+                message="Inventory sources stage started",
             )
-            return session
+
+            inventory = build_source_inventory(self._registry_documents.list_all())
+            totals = inventory["totals"]
+            self._store.record_artifact(
+                normalized_session_id,
+                stage_id=inventory_stage.stage_id,
+                kind="source_inventory_snapshot",
+                content=inventory,
+            )
+            inventory_counts = {
+                "indexed_count": totals["indexed"],
+                "skipped_count": totals["skipped"],
+                "failed_count": totals["failed"],
+            }
+            self._append_log(
+                normalized_session_id,
+                level="info",
+                message="Source inventory snapshot recorded",
+                stage_id=inventory_stage.stage_id,
+                payload={"stage_name": INVENTORY_SOURCES_STAGE_NAME, **inventory_counts},
+            )
+            self._store.complete_stage(
+                inventory_stage.stage_id,
+                summary=(
+                    f"Indexed {totals['indexed']}, skipped {totals['skipped']}, "
+                    f"failed {totals['failed']}"
+                ),
+            )
+            self._append_log(
+                normalized_session_id,
+                level="info",
+                message="Inventory sources stage completed",
+                stage_id=inventory_stage.stage_id,
+                payload={"stage_name": INVENTORY_SOURCES_STAGE_NAME, **inventory_counts},
+            )
+            self._emit_card(
+                handle.queue,
+                session_id=normalized_session_id,
+                stage_id=inventory_stage.stage_id,
+                stage_name=INVENTORY_SOURCES_STAGE_NAME,
+                kind="stage_completed",
+                message="Inventory sources stage completed",
+            )
         except Exception as exc:  # noqa: BLE001
-            failure_stage_id = None
-            failure_stage_name = BOOTSTRAP_STAGE_NAME
-            if awaiting_stage is not None:
-                failure_stage_id = awaiting_stage.stage_id
-                failure_stage_name = AWAITING_INVENTORY_STAGE_NAME
-            elif gate_closed:
-                failure_stage_id = gate.stage_id
-                failure_stage_name = BOOTSTRAP_STAGE_NAME
+            failure_stage_id = (
+                inventory_stage.stage_id if inventory_stage is not None else gate.stage_id
+            )
+            failure_stage_name = (
+                INVENTORY_SOURCES_STAGE_NAME
+                if inventory_stage is not None
+                else BOOTSTRAP_STAGE_NAME
+            )
             self._record_failure(
                 session_id=normalized_session_id,
                 handle=handle,
                 exc=exc,
                 stage_id=failure_stage_id,
                 stage_name=failure_stage_name,
-                should_fail_stage=not gate_closed or awaiting_stage_started,
+                should_fail_stage=inventory_stage is not None,
             )
             raise
+
+        try:
+            plan_stage = self._store.start_stage(
+                normalized_session_id,
+                PLAN_REPORT_SECTIONS_STAGE_NAME,
+            )
+            self._append_log(
+                normalized_session_id,
+                level="info",
+                message="Section planning stage started",
+                stage_id=plan_stage.stage_id,
+                payload={"stage_name": PLAN_REPORT_SECTIONS_STAGE_NAME},
+            )
+            self._emit_card(
+                handle.queue,
+                session_id=normalized_session_id,
+                stage_id=plan_stage.stage_id,
+                stage_name=PLAN_REPORT_SECTIONS_STAGE_NAME,
+                kind="stage_started",
+                message="Section planning stage started",
+            )
+
+            section_plan = build_general_project_dossier_section_plan(inventory)
+            sections = section_plan["sections"]
+            active_section_count = sum(1 for section in sections if section["active"])
+            self._store.record_artifact(
+                normalized_session_id,
+                stage_id=plan_stage.stage_id,
+                kind="section_plan",
+                content=section_plan,
+            )
+            section_counts = {
+                "section_count": len(sections),
+                "active_section_count": active_section_count,
+            }
+            self._append_log(
+                normalized_session_id,
+                level="info",
+                message="Section plan recorded",
+                stage_id=plan_stage.stage_id,
+                payload={"stage_name": PLAN_REPORT_SECTIONS_STAGE_NAME, **section_counts},
+            )
+            self._store.complete_stage(
+                plan_stage.stage_id,
+                summary=f"Planned {len(sections)} sections, {active_section_count} active",
+            )
+            self._append_log(
+                normalized_session_id,
+                level="info",
+                message="Section planning stage completed",
+                stage_id=plan_stage.stage_id,
+                payload={"stage_name": PLAN_REPORT_SECTIONS_STAGE_NAME, **section_counts},
+            )
+            self._emit_card(
+                handle.queue,
+                session_id=normalized_session_id,
+                stage_id=plan_stage.stage_id,
+                stage_name=PLAN_REPORT_SECTIONS_STAGE_NAME,
+                kind="stage_completed",
+                message="Section planning stage completed",
+            )
+        except Exception as exc:  # noqa: BLE001
+            failure_stage_id = (
+                plan_stage.stage_id if plan_stage is not None else inventory_stage.stage_id
+            )
+            failure_stage_name = (
+                PLAN_REPORT_SECTIONS_STAGE_NAME
+                if plan_stage is not None
+                else INVENTORY_SOURCES_STAGE_NAME
+            )
+            self._record_failure(
+                session_id=normalized_session_id,
+                handle=handle,
+                exc=exc,
+                stage_id=failure_stage_id,
+                stage_name=failure_stage_name,
+                should_fail_stage=plan_stage is not None,
+            )
+            raise
+
+        try:
+            session = self._store.update_session_status(
+                normalized_session_id,
+                "active",
+                current_stage=PLAN_REPORT_SECTIONS_STAGE_NAME,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._record_failure(
+                session_id=normalized_session_id,
+                handle=handle,
+                exc=exc,
+                stage_id=plan_stage.stage_id,
+                stage_name=PLAN_REPORT_SECTIONS_STAGE_NAME,
+                should_fail_stage=False,
+            )
+            raise
+        return session
 
     def _record_failure(
         self,

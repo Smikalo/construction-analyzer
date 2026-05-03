@@ -29,8 +29,9 @@ from app.schemas import (
     ReportStage,
     ReportValidationFinding,
 )
+from app.services.document_registry import DocumentRegistry
 from app.services.report_pipeline import ReportPipeline, ReportPipelineRegistry
-from app.services.report_sessions import ReportGateRecord
+from app.services.report_sessions import ReportGateRecord, ReportSessionStore
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -49,7 +50,7 @@ async def launch_report_session(
         raise HTTPException(status_code=422, detail="session_id must not be empty")
 
     state.pipeline_registry.get_or_create(session_id)
-    pipeline = _build_pipeline(state.pipeline_registry, state.report_sessions)
+    pipeline = _build_pipeline(state.pipeline_registry, state.report_sessions, state.registry)
     resumed = state.report_sessions.get_session(session_id) is not None
 
     metadata = dict(req.metadata)
@@ -72,7 +73,10 @@ async def get_report_session(session_id: str, request: Request) -> ReportSession
     if session is None:
         raise HTTPException(status_code=404, detail="report session not found")
 
-    stages = [_to_model(ReportStage, stage) for stage in state.report_sessions.list_stages(session_id)]
+    stages = [
+        _to_model(ReportStage, stage)
+        for stage in state.report_sessions.list_stages(session_id)
+    ]
     gates = [_to_model(ReportGate, gate) for gate in state.report_sessions.list_gates(session_id)]
     artifacts = [
         _to_model(ReportArtifact, artifact)
@@ -118,7 +122,7 @@ async def answer_report_gate(
     if gate.status != "open":
         raise HTTPException(status_code=409, detail="report gate is already closed")
 
-    pipeline = _build_pipeline(state.pipeline_registry, state.report_sessions)
+    pipeline = _build_pipeline(state.pipeline_registry, state.report_sessions, state.registry)
     try:
         await pipeline.answer_gate(session_id, req.answer, gate_id=gate.gate_id)
     except KeyError as exc:
@@ -170,9 +174,10 @@ async def stream_report_session(session_id: str, request: Request):
 
 def _build_pipeline(
     registry: ReportPipelineRegistry,
-    store,
+    store: ReportSessionStore,
+    document_registry: DocumentRegistry,
 ) -> ReportPipeline:
-    return ReportPipeline(store=store, registry=registry)
+    return ReportPipeline(store=store, registry=document_registry, registry_pipeline=registry)
 
 
 def _find_gate(

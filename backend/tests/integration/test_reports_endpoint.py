@@ -24,6 +24,43 @@ def _parse_sse_events(blob: str) -> list[tuple[str, str]]:
     return events
 
 
+def _seed_report_documents(registry) -> None:
+    indexed_record, _ = registry.register_or_get(
+        "hash-indexed",
+        document_id="doc-indexed",
+        original_filename="site-report.pdf",
+        stored_path="/app/data/documents/doc-indexed.pdf",
+        content_type="application/pdf",
+        byte_size=123,
+        uploaded_at="2026-05-01T10:00:00+00:00",
+    )
+    registry.update_status(indexed_record.document_id, "indexed")
+
+    failed_record, _ = registry.register_or_get(
+        "hash-failed",
+        document_id="doc-failed",
+        original_filename="calc.xlsx",
+        stored_path="/app/data/documents/doc-failed.xlsx",
+        content_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        byte_size=456,
+        uploaded_at="2026-05-01T11:00:00+00:00",
+    )
+    registry.update_status(failed_record.document_id, "failed", error="workbook parser failed")
+
+    skipped_record, _ = registry.register_or_get(
+        "hash-skipped",
+        document_id="doc-skipped",
+        original_filename="photo.png",
+        stored_path="/app/data/documents/doc-skipped.png",
+        content_type="image/png",
+        byte_size=789,
+        uploaded_at="2026-05-01T12:00:00+00:00",
+    )
+    registry.mark_skipped(skipped_record.document_id, reason="image_extractor_pending")
+
+
 class TestReportLaunch:
     async def test_launch_creates_session_and_bootstrap_stage(self, client: TestClient) -> None:
         response = client.post("/api/reports", json={})
@@ -151,13 +188,61 @@ class TestReportGateAnswer:
         session = store.get_session(session_id)
         assert session is not None
         assert session.status == "active"
-        assert session.current_stage == "awaiting_inventory"
+        assert session.current_stage == "plan_report_sections"
 
         stages = store.list_stages(session_id)
-        assert [stage.name for stage in stages] == ["bootstrap", "awaiting_inventory"]
+        assert [stage.name for stage in stages] == [
+            "bootstrap",
+            "inventory_sources",
+            "plan_report_sections",
+        ]
         gates = store.list_gates(session_id)
         assert gates[0].status == "closed"
         assert gates[0].answer == {"choice": "general_project_dossier"}
+
+    async def test_general_project_dossier_persists_inventory_and_section_plan_in_inspection(
+        self,
+        client: TestClient,
+    ) -> None:
+        registry = client.app.state.app_state.registry
+        _seed_report_documents(registry)
+
+        launch = client.post("/api/reports", json={})
+        session_id = launch.json()["session_id"]
+        gate_id = client.app.state.app_state.report_sessions.list_gates(session_id)[0].gate_id
+
+        response = client.post(
+            f"/api/reports/{session_id}/gates/{gate_id}/answer",
+            json={"answer": {"choice": "general_project_dossier"}},
+        )
+        assert response.status_code == 204
+
+        inspection = client.get(f"/api/reports/{session_id}")
+        assert inspection.status_code == 200
+
+        body = inspection.json()
+        assert body["current_stage"] == "plan_report_sections"
+        assert body["session"]["status"] == "active"
+        assert [item["kind"] for item in body["artifacts"]] == [
+            "source_inventory_snapshot",
+            "section_plan",
+        ]
+        assert [stage["name"] for stage in body["stages"]] == [
+            "bootstrap",
+            "inventory_sources",
+            "plan_report_sections",
+        ]
+        assert len(body["stages"]) == 3
+        assert body["artifacts"][0]["content"]["totals"] == {
+            "indexed": 1,
+            "skipped": 1,
+            "failed": 1,
+            "uploaded": 0,
+            "processing": 0,
+            "total": 3,
+        }
+        assert body["artifacts"][1]["content"]["template_id"] == "general_project_dossier"
+        assert len(body["artifacts"][1]["content"]["sections"]) == 14
 
     async def test_double_answering_closed_gate_returns_409(self, client: TestClient) -> None:
         launch = client.post("/api/reports", json={})
