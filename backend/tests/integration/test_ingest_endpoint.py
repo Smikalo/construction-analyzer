@@ -475,8 +475,9 @@ class TestIngestEndpoint:
             if record["metadata"]["extraction_mode"] == "converted_drawing_text_summary"
         )
         assert summary_record["content"].startswith(
-            "[source=north.dwg; element=drawing; extraction=converted_drawing_text_summary; "
-            "confidence=1.0; warnings=converter_note]"
+            "[source=north.dwg; layers=A-WALL; views=Level 1; entities=Door 7; "
+            "element=drawing; extraction=converted_drawing_text_summary; confidence=1.0; "
+            "warnings=converter_note]"
         )
         assert "Text layer mode: exact" in summary_record["content"]
         assert "Conversion warnings: converter_note" in summary_record["content"]
@@ -630,7 +631,8 @@ class TestIngestEndpoint:
             and record["metadata"]["xlsx_cell"] == "B2"
         )
         assert cell_record["content"].startswith(
-            "[source=loads.xlsx; element=cell; extraction=xlsx_cell; confidence=1.0]"
+            "[source=loads.xlsx; sheet=Loads; cell=B2; label=North [kN]; unit=kN; "
+            "element=cell; extraction=xlsx_cell; certainty=exact; confidence=1.0]"
         )
         assert cell_record["metadata"]["xlsx_sheet"] == "Loads"
         assert cell_record["metadata"]["xlsx_row_label"] == "North [kN]"
@@ -644,9 +646,11 @@ class TestIngestEndpoint:
             record for record in records if record["metadata"]["extraction_mode"] == "xlsx_formula"
         )
         assert formula_record["content"].startswith(
-            "[source=loads.xlsx; element=formula; extraction=xlsx_formula; confidence=1.0;"
+            "[source=loads.xlsx; sheet=Loads; cell=C2; label=12; "
+            "element=formula; extraction=xlsx_formula; "
+            "certainty=exact_formula_cached_value_unknown; confidence=1.0; "
+            "warnings=missing_cached_value]"
         )
-        assert "warnings=missing_cached_value" in formula_record["content"]
         assert formula_record["metadata"]["xlsx_formula"] == "=SUM(B2:B2)"
         assert formula_record["metadata"]["xlsx_value_kind"] == "missing_cached_value"
         assert formula_record["metadata"]["warnings"] == ["missing_cached_value"]
@@ -655,7 +659,8 @@ class TestIngestEndpoint:
             record for record in records if record["metadata"]["extraction_mode"] == "xlsx_comment"
         )
         assert comment_record["content"].startswith(
-            "[source=loads.xlsx; element=comment; extraction=xlsx_comment; confidence=1.0]"
+            "[source=loads.xlsx; sheet=Loads; cell=C2; "
+            "element=comment; extraction=xlsx_comment; certainty=exact; confidence=1.0]"
         )
         assert comment_record["metadata"]["xlsx_comment_author"] == "Planner"
         assert comment_record["metadata"]["xlsx_comment_text"] == "Needs review"
@@ -664,7 +669,8 @@ class TestIngestEndpoint:
             record for record in records if record["metadata"]["extraction_mode"] == "xlsx_table"
         )
         assert table_record["content"].startswith(
-            "[source=loads.xlsx; element=table; extraction=xlsx_table; confidence=1.0]"
+            "[source=loads.xlsx; sheet=Loads; range=A1:B2; table=LoadTable; "
+            "element=table; extraction=xlsx_table; confidence=1.0]"
         )
         assert table_record["metadata"]["xlsx_sheet"] == "Loads"
         assert table_record["metadata"]["xlsx_range"] == "A1:B2"

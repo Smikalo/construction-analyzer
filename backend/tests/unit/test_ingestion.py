@@ -1558,8 +1558,9 @@ class TestIngestDirectory:
                 if record["metadata"]["extraction_mode"] == "converted_drawing_text_summary"
             )
             assert dwg_summary["content"].startswith(
-                "[source=north.dwg; element=drawing; extraction=converted_drawing_text_summary; "
-                "confidence=1.0; warnings=converter_note]"
+                "[source=north.dwg; layers=A-WALL; views=Level 1; entities=Door 7; "
+                "element=drawing; extraction=converted_drawing_text_summary; confidence=1.0; "
+                "warnings=converter_note]"
             )
             assert "Source CAD path: " + str(nested_dir / "north.dwg") in dwg_summary["content"]
             assert f"Derived artifact path: {converted_path}" in dwg_summary["content"]
