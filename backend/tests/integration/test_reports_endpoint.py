@@ -596,6 +596,131 @@ class TestReportGateAnswer:
         assert second.status_code == 409
 
 
+class TestReportExportDownload:
+    def test_download_ready_export_returns_pdf_bytes_and_basename_header(
+        self,
+        client: TestClient,
+    ) -> None:
+        store = client.app.state.app_state.report_sessions
+        export_root = Path(client.app.state.app_state.report_exports_dir)
+        export_root.mkdir(parents=True, exist_ok=True)
+        pdf_path = export_root / "ready-report.pdf"
+        pdf_path.write_bytes(b"%PDF-1.7\nready export\n")
+
+        session = store.create_session()
+        export = store.create_export(
+            session.session_id,
+            format="pdf",
+            status="ready",
+            output_path=str(pdf_path),
+            diagnostics={"output_filename": pdf_path.name},
+        )
+
+        response = client.get(
+            f"/api/reports/{session.session_id}/exports/{export.export_id}/download"
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"] == "application/pdf"
+        assert response.content.startswith(b"%PDF")
+        content_disposition = response.headers["content-disposition"]
+        assert pdf_path.name in content_disposition
+        assert str(pdf_path.parent) not in content_disposition
+
+    def test_download_rejects_unknown_and_mismatched_exports(
+        self,
+        client: TestClient,
+    ) -> None:
+        store = client.app.state.app_state.report_sessions
+        export_root = Path(client.app.state.app_state.report_exports_dir)
+        export_root.mkdir(parents=True, exist_ok=True)
+        pdf_path = export_root / "other-session.pdf"
+        pdf_path.write_bytes(b"%PDF-1.7\nother session\n")
+
+        first_session = store.create_session()
+        second_session = store.create_session()
+        second_export = store.create_export(
+            second_session.session_id,
+            format="pdf",
+            status="ready",
+            output_path=str(pdf_path),
+        )
+
+        unknown_session = client.get(
+            "/api/reports/missing-session/exports/missing-export/download"
+        )
+        unknown_export = client.get(
+            f"/api/reports/{first_session.session_id}/exports/missing-export/download"
+        )
+        mismatched_export = client.get(
+            f"/api/reports/{first_session.session_id}/exports/"
+            f"{second_export.export_id}/download"
+        )
+
+        assert unknown_session.status_code == 404
+        assert unknown_export.status_code == 404
+        assert mismatched_export.status_code == 404
+
+    def test_download_rejects_non_ready_missing_and_escaping_paths(
+        self,
+        client: TestClient,
+        tmp_path: Path,
+    ) -> None:
+        store = client.app.state.app_state.report_sessions
+        export_root = Path(client.app.state.app_state.report_exports_dir)
+        export_root.mkdir(parents=True, exist_ok=True)
+        pdf_path = export_root / "pending-report.pdf"
+        pdf_path.write_bytes(b"%PDF-1.7\npending export\n")
+        outside_path = tmp_path / "outside-report.pdf"
+        outside_path.write_bytes(b"%PDF-1.7\noutside export\n")
+
+        session = store.create_session()
+        pending_export = store.create_export(
+            session.session_id,
+            format="pdf",
+            status="pending",
+            output_path=str(pdf_path),
+        )
+        no_path_export = store.create_export(
+            session.session_id,
+            format="pdf",
+            status="ready",
+            output_path=None,
+        )
+        missing_file_export = store.create_export(
+            session.session_id,
+            format="pdf",
+            status="ready",
+            output_path=str(export_root / "missing-report.pdf"),
+        )
+        escaping_export = store.create_export(
+            session.session_id,
+            format="pdf",
+            status="ready",
+            output_path=str(outside_path),
+        )
+
+        pending = client.get(
+            f"/api/reports/{session.session_id}/exports/{pending_export.export_id}/download"
+        )
+        no_path = client.get(
+            f"/api/reports/{session.session_id}/exports/{no_path_export.export_id}/download"
+        )
+        missing_file = client.get(
+            f"/api/reports/{session.session_id}/exports/"
+            f"{missing_file_export.export_id}/download"
+        )
+        escaping = client.get(
+            f"/api/reports/{session.session_id}/exports/{escaping_export.export_id}/download"
+        )
+
+        assert pending.status_code == 409
+        assert no_path.status_code == 404
+        assert missing_file.status_code == 404
+        assert escaping.status_code == 404
+        assert str(outside_path) not in escaping.text
+
+
 class TestReportStream:
     async def test_stream_emits_report_card_and_report_gate_events(
         self,

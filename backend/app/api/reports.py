@@ -11,9 +11,11 @@ import asyncio
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, TypeVar
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import FileResponse
 from langchain_core.language_models import BaseChatModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -34,7 +36,11 @@ from app.schemas import (
 )
 from app.services.document_registry import DocumentRegistry
 from app.services.report_pipeline import ReportPipeline, ReportPipelineRegistry
-from app.services.report_sessions import ReportGateRecord, ReportSessionStore
+from app.services.report_sessions import (
+    ReportExportRecord,
+    ReportGateRecord,
+    ReportSessionStore,
+)
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -111,6 +117,37 @@ async def get_report_session(session_id: str, request: Request) -> ReportSession
         validation_findings=validation_findings,
         exports=exports,
         recent_logs=recent_logs,
+    )
+
+
+@router.get("/{session_id}/exports/{export_id}/download")
+async def download_report_export(
+    session_id: str,
+    export_id: str,
+    request: Request,
+) -> FileResponse:
+    state = request.app.state.app_state
+    session = state.report_sessions.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="report session not found")
+
+    export = _find_export(state.report_sessions, session_id, export_id)
+    if export is None:
+        raise HTTPException(status_code=404, detail="report export not found")
+    if export.status != "ready":
+        raise HTTPException(status_code=409, detail="report export is not ready")
+
+    output_path = _resolve_export_download_path(
+        export.output_path,
+        export_root=state.report_exports_dir,
+    )
+    if output_path is None or not output_path.is_file():
+        raise HTTPException(status_code=404, detail="report export file not found")
+
+    return FileResponse(
+        output_path,
+        media_type="application/pdf",
+        filename=output_path.name,
     )
 
 
@@ -221,6 +258,42 @@ def _find_gate(
         if gate.gate_id == normalized_gate_id:
             return gate
     return None
+
+
+def _find_export(
+    store: ReportSessionStore,
+    session_id: str,
+    export_id: str,
+) -> ReportExportRecord | None:
+    normalized_export_id = export_id.strip()
+    if not normalized_export_id:
+        raise HTTPException(status_code=422, detail="export_id must not be empty")
+    for export in store.list_exports(session_id):
+        if export.export_id == normalized_export_id:
+            return export
+    return None
+
+
+def _resolve_export_download_path(
+    output_path: str | None,
+    *,
+    export_root: str,
+) -> Path | None:
+    if output_path is None or not output_path.strip():
+        return None
+
+    try:
+        export_dir = Path(export_root).expanduser().resolve()
+        candidate = Path(output_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = export_dir / candidate
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError):
+        return None
+
+    if not resolved.is_relative_to(export_dir):
+        return None
+    return resolved
 
 
 def _to_model(model: type[TModel], record: Any) -> TModel:
