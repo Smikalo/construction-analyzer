@@ -63,23 +63,58 @@ class TestReportLaunch:
 
 
 class TestReportInspection:
-    async def test_get_returns_open_gate_and_recent_logs(self, client: TestClient) -> None:
+    async def test_get_returns_artifacts_validation_findings_and_exports(
+        self,
+        client: TestClient,
+    ) -> None:
         launch = client.post("/api/reports", json={})
         session_id = launch.json()["session_id"]
+        store = client.app.state.app_state.report_sessions
+
+        artifact = store.record_artifact(
+            session_id,
+            kind="section_plan",
+            content={"section": "timeline"},
+            created_at="2024-01-01T00:00:00Z",
+        )
+        finding = store.record_validation_finding(
+            session_id,
+            severity="warning",
+            code="W001",
+            message="Needs review",
+            payload={"section": "timeline"},
+            created_at="2024-01-01T00:00:01Z",
+        )
+        export = store.create_export(
+            session_id,
+            format="pdf",
+            status="ready",
+            output_path="report.pdf",
+            diagnostics={"pages": 4},
+            created_at="2024-01-01T00:00:02Z",
+        )
 
         response = client.get(f"/api/reports/{session_id}")
         assert response.status_code == 200
 
         body = response.json()
-        assert body["session"]["session_id"] == session_id
-        assert body["current_stage"] == "bootstrap"
-        assert [gate["status"] for gate in body["gates"]] == ["open"]
-        assert body["gates"][0]["gate_id"] == "report_template_confirmation"
-        assert [log["message"] for log in body["recent_logs"]] == [
-            "Report bootstrap stage started",
-            "Report template confirmation gate opened",
-            "Report bootstrap stage completed",
+        assert [item["artifact_id"] for item in body["artifacts"]] == [artifact.artifact_id]
+        assert [item["kind"] for item in body["artifacts"]] == ["section_plan"]
+        assert [item["finding_id"] for item in body["validation_findings"]] == [
+            finding.finding_id
         ]
+        assert [item["severity"] for item in body["validation_findings"]] == ["warning"]
+        assert [item["export_id"] for item in body["exports"]] == [export.export_id]
+        assert [item["status"] for item in body["exports"]] == ["ready"]
+
+        fresh_session = store.create_session()
+        fresh_response = client.get(f"/api/reports/{fresh_session.session_id}")
+        assert fresh_response.status_code == 200
+
+        fresh_body = fresh_response.json()
+        assert fresh_body["artifacts"] == []
+        assert fresh_body["validation_findings"] == []
+        assert fresh_body["exports"] == []
 
     async def test_unknown_session_returns_404_for_inspection_and_gate_answer(
         self,

@@ -17,6 +17,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.schemas import (
     ChatChunk,
+    ReportArtifact,
+    ReportExport,
     ReportGate,
     ReportGateAnswerRequest,
     ReportLog,
@@ -25,6 +27,7 @@ from app.schemas import (
     ReportSessionLaunchRequest,
     ReportSessionLaunchResponse,
     ReportStage,
+    ReportValidationFinding,
 )
 from app.services.report_pipeline import ReportPipeline, ReportPipelineRegistry
 from app.services.report_sessions import ReportGateRecord
@@ -71,6 +74,17 @@ async def get_report_session(session_id: str, request: Request) -> ReportSession
 
     stages = [_to_model(ReportStage, stage) for stage in state.report_sessions.list_stages(session_id)]
     gates = [_to_model(ReportGate, gate) for gate in state.report_sessions.list_gates(session_id)]
+    artifacts = [
+        _to_model(ReportArtifact, artifact)
+        for artifact in state.report_sessions.list_artifacts(session_id)
+    ]
+    validation_findings = [
+        _to_model(ReportValidationFinding, finding)
+        for finding in state.report_sessions.list_validation_findings(session_id)
+    ]
+    exports = [
+        _to_model(ReportExport, export) for export in state.report_sessions.list_exports(session_id)
+    ]
     recent_logs = [
         _to_model(ReportLog, log) for log in state.report_sessions.list_logs(session_id)
     ]
@@ -79,6 +93,9 @@ async def get_report_session(session_id: str, request: Request) -> ReportSession
         current_stage=session.current_stage,
         stages=stages,
         gates=gates,
+        artifacts=artifacts,
+        validation_findings=validation_findings,
+        exports=exports,
         recent_logs=recent_logs,
     )
 

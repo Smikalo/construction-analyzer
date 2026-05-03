@@ -98,6 +98,14 @@ describe("useChatStore", () => {
     });
   });
 
+  it("setActiveView toggles between graph and report", () => {
+    expect(useChatStore.getState().activeView).toBe("graph");
+    useChatStore.getState().setActiveView("report");
+    expect(useChatStore.getState().activeView).toBe("report");
+    useChatStore.getState().setActiveView("graph");
+    expect(useChatStore.getState().activeView).toBe("graph");
+  });
+
   describe("report sessions", () => {
     it("launchReport stores the report id and appends streamed cards", async () => {
       const reportCard = {
@@ -181,6 +189,7 @@ describe("useChatStore", () => {
 
       expect(launch).toEqual(launchResponse);
       expect(useChatStore.getState().activeReportId).toBe("report-123");
+      expect(useChatStore.getState().activeView).toBe("report");
       expect(window.localStorage.getItem(REPORT_STORAGE_KEY)).toBe("report-123");
       expect(useChatStore.getState().reportStatus).toBe("active");
       expect(useChatStore.getState().reportCards.map((card) => card.kind)).toEqual([
@@ -188,6 +197,48 @@ describe("useChatStore", () => {
         "gate_closed",
       ]);
       expect(useChatStore.getState().currentGate).toBeNull();
+    });
+
+    it("launchReport only auto-switches the first time the report view opens", async () => {
+      const launchResponse = {
+        session_id: "report-123",
+        status: "blocked",
+        current_stage: "bootstrap",
+        resumed: false,
+      } as const;
+      const sseBody = `event: message
+data: ${JSON.stringify({ type: "done", data: "" })}
+
+`;
+      let launchCount = 0;
+
+      server.use(
+        http.post(`${BACKEND}/api/reports`, async ({ request }) => {
+          const body = await request.json();
+          if (launchCount === 0) {
+            expect(body).toEqual({});
+          } else {
+            expect(body).toEqual({ session_id: "report-123" });
+          }
+          launchCount += 1;
+          return HttpResponse.json(launchResponse);
+        }),
+        http.get(`${BACKEND}/api/reports/report-123/stream`, () =>
+          new HttpResponse(sseBody, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          }),
+        ),
+      );
+
+      await useChatStore.getState().launchReport();
+      expect(useChatStore.getState().activeView).toBe("report");
+      expect(useChatStore.getState().activeReportId).toBe("report-123");
+
+      useChatStore.getState().setActiveView("graph");
+      await useChatStore.getState().launchReport();
+      expect(useChatStore.getState().activeView).toBe("graph");
+      expect(useChatStore.getState().activeReportId).toBe("report-123");
     });
 
     it("submitReportGateAnswer clears the gate before posting the answer", async () => {
@@ -269,6 +320,39 @@ describe("useChatStore", () => {
                 closed_at: null,
               },
             ],
+            artifacts: [
+              {
+                artifact_id: "artifact-1",
+                session_id: "report-123",
+                stage_id: "stage-1",
+                kind: "section_plan",
+                content: { section: "timeline" },
+                created_at: "2024-01-01T00:00:00Z",
+              },
+            ],
+            validation_findings: [
+              {
+                finding_id: "finding-1",
+                session_id: "report-123",
+                severity: "warning",
+                code: "W001",
+                message: "Needs review",
+                payload: { section: "timeline" },
+                created_at: "2024-01-01T00:00:01Z",
+              },
+            ],
+            exports: [
+              {
+                export_id: "export-1",
+                session_id: "report-123",
+                status: "ready",
+                format: "pdf",
+                output_path: "report.pdf",
+                diagnostics: { pages: 4 },
+                created_at: "2024-01-01T00:00:02Z",
+                completed_at: "2024-01-01T00:00:03Z",
+              },
+            ],
             recent_logs: [
               {
                 log_id: "log-1",
@@ -305,11 +389,37 @@ describe("useChatStore", () => {
       await useChatStore.getState().hydrateReportFromStorage();
 
       expect(useChatStore.getState().activeReportId).toBe("report-123");
+      expect(useChatStore.getState().activeView).toBe("report");
       expect(useChatStore.getState().reportStatus).toBe("blocked");
       expect(useChatStore.getState().currentGate).toMatchObject({
         gate_id: "gate-1",
         status: "open",
       });
+      expect(useChatStore.getState().stages).toEqual([
+        expect.objectContaining({
+          stage_id: "stage-1",
+          name: "bootstrap",
+          status: "complete",
+        }),
+      ]);
+      expect(useChatStore.getState().artifacts).toEqual([
+        expect.objectContaining({
+          artifact_id: "artifact-1",
+          kind: "section_plan",
+        }),
+      ]);
+      expect(useChatStore.getState().validationFindings).toEqual([
+        expect.objectContaining({
+          finding_id: "finding-1",
+          severity: "warning",
+        }),
+      ]);
+      expect(useChatStore.getState().exports).toEqual([
+        expect.objectContaining({
+          export_id: "export-1",
+          status: "ready",
+        }),
+      ]);
       expect(useChatStore.getState().reportCards).toHaveLength(2);
       expect(useChatStore.getState().reportCards.map((card) => card.kind)).toEqual([
         "stage_started",

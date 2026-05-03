@@ -28,7 +28,50 @@ export type ReportCardKind =
   | "gate_closed"
   | "failure";
 
+export type ReportArtifactKind =
+  | "source_inventory_snapshot"
+  | "section_plan"
+  | "paragraph_citations"
+  | "validation_finding"
+  | "pdf_export"
+  | "other";
+
+export type ReportValidationSeverity = "info" | "warning" | "blocker";
+
+export type ReportExportStatus = "pending" | "ready" | "failed";
+
 export type ReportLogLevel = "debug" | "info" | "warning" | "error";
+
+export type ReportArtifact = {
+  artifact_id: string;
+  session_id: string;
+  stage_id: string | null;
+  kind: ReportArtifactKind;
+  content: JsonObject;
+  created_at: string;
+};
+
+export type ReportValidationFinding = {
+  finding_id: string;
+  session_id: string;
+  severity: ReportValidationSeverity;
+  code: string | null;
+  message: string;
+  payload: JsonObject;
+  created_at: string;
+};
+
+export type ReportExport = {
+  export_id: string;
+  session_id: string;
+  status: ReportExportStatus;
+  format: string;
+  output_path: string | null;
+  diagnostics: JsonObject;
+  created_at: string;
+  completed_at: string | null;
+};
+
 
 export type ReportCardPayload = {
   session_id: string;
@@ -109,6 +152,9 @@ export type ReportSessionInspectionResponse = {
   current_stage: string | null;
   stages: ReportStage[];
   gates: ReportGate[];
+  artifacts: ReportArtifact[];
+  validation_findings: ReportValidationFinding[];
+  exports: ReportExport[];
   recent_logs: ReportLog[];
 };
 

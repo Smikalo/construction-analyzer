@@ -169,6 +169,9 @@ class ReportSessionInspectionResponse(BaseModel):
     current_stage: str | None = None
     stages: list[ReportStage] = Field(default_factory=list)
     gates: list[ReportGate] = Field(default_factory=list)
+    artifacts: list[ReportArtifact] = Field(default_factory=list)
+    validation_findings: list[ReportValidationFinding] = Field(default_factory=list)
+    exports: list[ReportExport] = Field(default_factory=list)
     recent_logs: list[ReportLog] = Field(default_factory=list)
 
 

@@ -8,11 +8,15 @@ import {
 import type {
   JsonObject,
   Message,
+  ReportArtifact,
   ReportCardPayload,
+  ReportExport,
   ReportGatePayload,
   ReportSessionInspectionResponse,
   ReportSessionLaunchResponse,
   ReportSessionStatus,
+  ReportStage,
+  ReportValidationFinding,
   Role,
 } from "@/types";
 import {
@@ -46,9 +50,14 @@ type State = {
   messages: Message[];
   threadId: string | null;
   activeReportId: string | null;
+  activeView: "graph" | "report";
   reportStatus: ReportSessionStatus | null;
   reportCards: ReportCardPayload[];
   currentGate: ReportGatePayload | null;
+  stages: ReportStage[];
+  artifacts: ReportArtifact[];
+  validationFindings: ReportValidationFinding[];
+  exports: ReportExport[];
   reportError: string | null;
   status: ConnectionStatus;
 
@@ -87,6 +96,7 @@ type Actions = {
   // Original
   reset: () => void;
   setThreadId: (id: string | null) => void;
+  setActiveView: (view: "graph" | "report") => void;
   hydrateThreadIdFromStorage: () => void;
   clearThread: () => void;
   launchReport: () => Promise<ReportSessionLaunchResponse>;
@@ -146,9 +156,14 @@ const INITIAL: State = {
   messages: [],
   threadId: null,
   activeReportId: null,
+  activeView: "graph",
   reportStatus: null,
   reportCards: [] as ReportCardPayload[],
   currentGate: null,
+  stages: [] as ReportStage[],
+  artifacts: [] as ReportArtifact[],
+  validationFindings: [] as ReportValidationFinding[],
+  exports: [] as ReportExport[],
   reportError: null,
   status: "unknown",
 
@@ -323,6 +338,8 @@ export const useChatStore = create<State & Actions>((set, get) => ({
     set({ threadId: id });
   },
 
+  setActiveView: (view) => set({ activeView: view }),
+
   hydrateThreadIdFromStorage: () => {
     if (typeof window === "undefined") return;
     const id = window.localStorage.getItem(THREAD_STORAGE_KEY);
@@ -337,7 +354,10 @@ export const useChatStore = create<State & Actions>((set, get) => ({
   },
 
   launchReport: async () => {
-    const storedReportId = get().activeReportId ?? readStoredReportId();
+    const stateBeforeLaunch = get();
+    const storedReportId = stateBeforeLaunch.activeReportId ?? readStoredReportId();
+    const shouldOpenReportView =
+      stateBeforeLaunch.activeView === "graph" && stateBeforeLaunch.activeReportId === null;
     const launch = await createOrResumeReportSession(
       storedReportId ? { session_id: storedReportId } : {},
     );
@@ -348,7 +368,17 @@ export const useChatStore = create<State & Actions>((set, get) => ({
       activeReportId: launch.session_id,
       reportStatus: launch.status,
       reportError: null,
-      ...(isNewSession ? { reportCards: [], currentGate: null } : {}),
+      ...(shouldOpenReportView ? { activeView: "report" } : {}),
+      ...(isNewSession
+        ? {
+            reportCards: [],
+            currentGate: null,
+            stages: [],
+            artifacts: [],
+            validationFindings: [],
+            exports: [],
+          }
+        : {}),
     });
 
     void streamReportSession(launch.session_id, {
@@ -410,9 +440,14 @@ export const useChatStore = create<State & Actions>((set, get) => ({
       const snapshot = buildReportSnapshotFromInspection(inspection);
       set({
         activeReportId: inspection.session.session_id,
+        activeView: "report",
         reportStatus: inspection.session.status,
         reportCards: snapshot.reportCards,
         currentGate: snapshot.currentGate,
+        stages: inspection.stages,
+        artifacts: inspection.artifacts,
+        validationFindings: inspection.validation_findings,
+        exports: inspection.exports,
         reportError: inspection.session.last_error,
       });
       persistReportId(inspection.session.session_id);
