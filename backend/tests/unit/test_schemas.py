@@ -15,6 +15,13 @@ from app.schemas import (
     IngestResponse,
     Message,
     ReadinessStatus,
+    ReportArtifact,
+    ReportExport,
+    ReportGate,
+    ReportLog,
+    ReportSession,
+    ReportStage,
+    ReportValidationFinding,
     ThreadHistory,
     ThreadInfo,
 )
@@ -129,3 +136,209 @@ class TestIngestResponse:
         )
         assert r.ingested_files == 2
         assert len(r.memory_ids) == 5
+
+
+class TestReportSchemas:
+    @pytest.mark.parametrize(
+        ("model_cls", "kwargs"),
+        [
+            (
+                ReportSession,
+                {
+                    "session_id": "session-1",
+                    "status": "active",
+                    "current_stage": "drafting",
+                    "created_at": "2026-05-03T00:00:00Z",
+                    "updated_at": "2026-05-03T00:01:00Z",
+                    "last_error": None,
+                    "metadata": {"report": "alpha"},
+                },
+            ),
+            (
+                ReportStage,
+                {
+                    "stage_id": "stage-1",
+                    "session_id": "session-1",
+                    "name": "drafting",
+                    "status": "active",
+                    "started_at": "2026-05-03T00:00:01Z",
+                    "completed_at": None,
+                    "summary": "Drafting started",
+                    "error": None,
+                },
+            ),
+            (
+                ReportGate,
+                {
+                    "gate_id": "gate-1",
+                    "session_id": "session-1",
+                    "stage_id": "stage-1",
+                    "status": "open",
+                    "question": {"prompt": "Proceed?"},
+                    "answer": {},
+                    "created_at": "2026-05-03T00:00:02Z",
+                    "closed_at": None,
+                },
+            ),
+            (
+                ReportArtifact,
+                {
+                    "artifact_id": "artifact-1",
+                    "session_id": "session-1",
+                    "stage_id": "stage-1",
+                    "kind": "section_plan",
+                    "content": {"sections": ["intro"]},
+                    "created_at": "2026-05-03T00:00:03Z",
+                },
+            ),
+            (
+                ReportLog,
+                {
+                    "log_id": "log-1",
+                    "session_id": "session-1",
+                    "stage_id": "stage-1",
+                    "level": "info",
+                    "message": "stage started",
+                    "payload": {"provenance": ["stage-1"]},
+                    "created_at": "2026-05-03T00:00:04Z",
+                },
+            ),
+            (
+                ReportValidationFinding,
+                {
+                    "finding_id": "finding-1",
+                    "session_id": "session-1",
+                    "severity": "warning",
+                    "code": "UNCERTAIN_SOURCE",
+                    "message": "missing appendix provenance",
+                    "payload": {"source_ids": ["doc-1"]},
+                    "created_at": "2026-05-03T00:00:05Z",
+                },
+            ),
+            (
+                ReportExport,
+                {
+                    "export_id": "export-1",
+                    "session_id": "session-1",
+                    "status": "ready",
+                    "format": "pdf",
+                    "output_path": "reports/report.pdf",
+                    "diagnostics": {"pages": 12},
+                    "created_at": "2026-05-03T00:00:06Z",
+                    "completed_at": "2026-05-03T00:02:00Z",
+                },
+            ),
+        ],
+    )
+    def test_report_model_round_trip(self, model_cls, kwargs) -> None:
+        model = model_cls(**kwargs)
+        assert model_cls.model_validate(model.model_dump()) == model
+
+    @pytest.mark.parametrize(
+        ("model_cls", "kwargs"),
+        [
+            (
+                ReportSession,
+                {
+                    "session_id": "session-1",
+                    "status": "bogus",
+                    "created_at": "2026-05-03T00:00:00Z",
+                },
+            ),
+            (
+                ReportStage,
+                {
+                    "stage_id": "stage-1",
+                    "session_id": "session-1",
+                    "name": "drafting",
+                    "status": "bogus",
+                },
+            ),
+            (
+                ReportGate,
+                {
+                    "gate_id": "gate-1",
+                    "session_id": "session-1",
+                    "status": "bogus",
+                    "question": {},
+                    "created_at": "2026-05-03T00:00:02Z",
+                },
+            ),
+            (
+                ReportArtifact,
+                {
+                    "artifact_id": "artifact-1",
+                    "session_id": "session-1",
+                    "kind": "bogus",
+                    "content": {},
+                    "created_at": "2026-05-03T00:00:03Z",
+                },
+            ),
+            (
+                ReportLog,
+                {
+                    "log_id": "log-1",
+                    "session_id": "session-1",
+                    "level": "bogus",
+                    "message": "stage started",
+                    "created_at": "2026-05-03T00:00:04Z",
+                },
+            ),
+            (
+                ReportValidationFinding,
+                {
+                    "finding_id": "finding-1",
+                    "session_id": "session-1",
+                    "severity": "bogus",
+                    "message": "missing appendix provenance",
+                    "created_at": "2026-05-03T00:00:05Z",
+                },
+            ),
+            (
+                ReportExport,
+                {
+                    "export_id": "export-1",
+                    "session_id": "session-1",
+                    "status": "bogus",
+                    "format": "pdf",
+                    "created_at": "2026-05-03T00:00:06Z",
+                },
+            ),
+        ],
+    )
+    def test_unknown_status_strings_are_rejected(self, model_cls, kwargs) -> None:
+        with pytest.raises(ValidationError):
+            model_cls(**kwargs)
+
+    def test_json_payload_fields_default_to_empty_dicts(self) -> None:
+        session = ReportSession(session_id="session-1", created_at="2026-05-03T00:00:00Z")
+        gate = ReportGate(
+            gate_id="gate-1", session_id="session-1", created_at="2026-05-03T00:00:01Z"
+        )
+        log = ReportLog(
+            log_id="log-1",
+            session_id="session-1",
+            level="info",
+            message="ok",
+            created_at="2026-05-03T00:00:02Z",
+        )
+        finding = ReportValidationFinding(
+            finding_id="finding-1",
+            session_id="session-1",
+            severity="info",
+            message="note",
+            created_at="2026-05-03T00:00:03Z",
+        )
+        export = ReportExport(
+            export_id="export-1",
+            session_id="session-1",
+            format="pdf",
+            created_at="2026-05-03T00:00:04Z",
+        )
+
+        assert session.metadata == {}
+        assert gate.question == {}
+        assert gate.answer == {}
+        assert log.payload == {}
+        assert finding.payload == {}
+        assert export.diagnostics == {}
