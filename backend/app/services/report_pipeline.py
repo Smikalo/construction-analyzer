@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from langchain_core.language_models import BaseChatModel
+
+from app.kb.base import KnowledgeBase
 from app.schemas import ChatChunk, ReportCardPayload, ReportGatePayload
+from app.services import report_drafter, report_retriever
 from app.services.document_registry import DocumentRegistry
 from app.services.report_planner import (
     build_general_project_dossier_section_plan,
@@ -17,6 +22,8 @@ from app.services.report_sessions import ReportGateRecord, ReportSessionRecord, 
 BOOTSTRAP_STAGE_NAME = "bootstrap"
 INVENTORY_SOURCES_STAGE_NAME = "inventory_sources"
 PLAN_REPORT_SECTIONS_STAGE_NAME = "plan_report_sections"
+RETRIEVE_SECTION_EVIDENCE_STAGE_NAME = "retrieve_section_evidence"
+DRAFT_REPORT_SECTIONS_STAGE_NAME = "draft_report_sections"
 REPORT_TEMPLATE_CONFIRMATION_GATE_ID = "report_template_confirmation"
 _ALLOWED_GATE_CHOICES = {"general_project_dossier", "cancel"}
 
@@ -54,10 +61,14 @@ class ReportPipeline:
         self,
         store: ReportSessionStore,
         registry: DocumentRegistry,
+        kb: KnowledgeBase,
+        llm_factory: Callable[[], BaseChatModel],
         registry_pipeline: ReportPipelineRegistry | None = None,
     ) -> None:
         self._store = store
         self._registry_documents = registry
+        self._kb = kb
+        self._llm_factory = llm_factory
         self._registry = registry_pipeline or ReportPipelineRegistry()
 
     def events(self, session_id: str) -> asyncio.Queue[ChatChunk]:
@@ -186,7 +197,10 @@ class ReportPipeline:
 
         inventory_stage = None
         plan_stage = None
+        retrieval_stage = None
+        draft_stage = None
         inventory: dict[str, Any] = {}
+        manifest_sections: list[dict[str, Any]] = []
         try:
             closed_gate = self._store.close_gate(gate.gate_id, answer=answer)
             self._append_log(
@@ -393,23 +407,306 @@ class ReportPipeline:
             raise
 
         try:
-            session = self._store.update_session_status(
+            retrieval_stage = self._store.start_stage(
                 normalized_session_id,
-                "active",
-                current_stage=PLAN_REPORT_SECTIONS_STAGE_NAME,
+                RETRIEVE_SECTION_EVIDENCE_STAGE_NAME,
+            )
+            self._append_log(
+                normalized_session_id,
+                level="info",
+                message="Section evidence retrieval started",
+                stage_id=retrieval_stage.stage_id,
+                payload={"stage_name": RETRIEVE_SECTION_EVIDENCE_STAGE_NAME},
+            )
+            self._emit_card(
+                handle.queue,
+                session_id=normalized_session_id,
+                stage_id=retrieval_stage.stage_id,
+                stage_name=RETRIEVE_SECTION_EVIDENCE_STAGE_NAME,
+                kind="stage_started",
+                message="Section evidence retrieval started",
+            )
+
+            artifacts = self._store.list_artifacts(normalized_session_id)
+            section_plan_artifact = next(
+                (
+                    artifact
+                    for artifact in reversed(artifacts)
+                    if artifact.kind == "section_plan"
+                ),
+                None,
+            )
+            if section_plan_artifact is None:
+                raise RuntimeError("section plan artifact not found")
+
+            manifest = await report_retriever.retrieve_section_evidence(
+                section_plan_artifact.content,
+                kb=self._kb,
+            )
+            raw_sections = manifest.get("sections")
+            if isinstance(raw_sections, list):
+                manifest_sections = [
+                    section for section in raw_sections if isinstance(section, dict)
+                ]
+            else:
+                manifest_sections = []
+
+            self._store.record_artifact(
+                normalized_session_id,
+                stage_id=retrieval_stage.stage_id,
+                kind="other",
+                content={"kind": "retrieval_manifest", **manifest},
+            )
+
+            retrieval_sections_summary: list[dict[str, Any]] = []
+            for section_entry in manifest_sections:
+                section_id = str(section_entry.get("id", "")).strip()
+                if not section_id:
+                    continue
+                total_hit_count = int(section_entry.get("total_hit_count") or 0)
+                retrieval_sections_summary.append(
+                    {"id": section_id, "total_hit_count": total_hit_count}
+                )
+                raw_queries = section_entry.get("queries")
+                if isinstance(raw_queries, list):
+                    for query_entry in raw_queries:
+                        if not isinstance(query_entry, dict):
+                            continue
+                        family = str(query_entry.get("family", "")).strip()
+                        if not family:
+                            continue
+                        hit_count = int(query_entry.get("hit_count") or 0)
+                        self._append_log(
+                            normalized_session_id,
+                            level="info",
+                            message=(
+                                f"Recalled {hit_count} memories for section {section_id} "
+                                f"in family {family}"
+                            ),
+                            stage_id=retrieval_stage.stage_id,
+                            payload={
+                                "section_id": section_id,
+                                "family": family,
+                                "hit_count": hit_count,
+                            },
+                        )
+
+            self._store.complete_stage(
+                retrieval_stage.stage_id,
+                summary=(
+                    f"Retrieved evidence for {len(retrieval_sections_summary)} sections"
+                ),
+            )
+            self._append_log(
+                normalized_session_id,
+                level="info",
+                message="Section evidence retrieval completed",
+                stage_id=retrieval_stage.stage_id,
+                payload={
+                    "stage_name": RETRIEVE_SECTION_EVIDENCE_STAGE_NAME,
+                    "sections": retrieval_sections_summary,
+                },
+            )
+            self._emit_card(
+                handle.queue,
+                session_id=normalized_session_id,
+                stage_id=retrieval_stage.stage_id,
+                stage_name=RETRIEVE_SECTION_EVIDENCE_STAGE_NAME,
+                kind="stage_completed",
+                message="Section evidence retrieval completed",
             )
         except Exception as exc:  # noqa: BLE001
+            failure_stage_id = (
+                retrieval_stage.stage_id if retrieval_stage is not None else plan_stage.stage_id
+            )
+            failure_stage_name = (
+                RETRIEVE_SECTION_EVIDENCE_STAGE_NAME
+                if retrieval_stage is not None
+                else PLAN_REPORT_SECTIONS_STAGE_NAME
+            )
             self._record_failure(
                 session_id=normalized_session_id,
                 handle=handle,
                 exc=exc,
-                stage_id=plan_stage.stage_id,
-                stage_name=PLAN_REPORT_SECTIONS_STAGE_NAME,
-                should_fail_stage=False,
+                stage_id=failure_stage_id,
+                stage_name=failure_stage_name,
+                should_fail_stage=retrieval_stage is not None,
             )
             raise
-        return session
 
+        try:
+            draft_stage = self._store.start_stage(
+                normalized_session_id,
+                DRAFT_REPORT_SECTIONS_STAGE_NAME,
+            )
+            self._append_log(
+                normalized_session_id,
+                level="info",
+                message="Report section drafting started",
+                stage_id=draft_stage.stage_id,
+                payload={"stage_name": DRAFT_REPORT_SECTIONS_STAGE_NAME},
+            )
+            self._emit_card(
+                handle.queue,
+                session_id=normalized_session_id,
+                stage_id=draft_stage.stage_id,
+                stage_name=DRAFT_REPORT_SECTIONS_STAGE_NAME,
+                kind="stage_started",
+                message="Report section drafting started",
+            )
+
+            llm = self._llm_factory()
+            drafted_sections_summary: list[dict[str, Any]] = []
+            for section_entry in manifest_sections:
+                section_id = str(section_entry.get("id", "")).strip()
+                if not section_id:
+                    continue
+                total_hit_count = int(section_entry.get("total_hit_count") or 0)
+                if total_hit_count == 0:
+                    self._store.record_artifact(
+                        normalized_session_id,
+                        stage_id=draft_stage.stage_id,
+                        kind="paragraph_citations",
+                        content={
+                            "section_id": section_id,
+                            "paragraph_index": 0,
+                            "text": "",
+                            "evidence_manifest": [],
+                            "no_evidence": True,
+                        },
+                    )
+                    self._append_log(
+                        normalized_session_id,
+                        level="warning",
+                        message=f"Section {section_id} drafted with no evidence",
+                        stage_id=draft_stage.stage_id,
+                        payload={
+                            "section_id": section_id,
+                            "paragraph_count": 0,
+                            "no_evidence": True,
+                            "total_hit_count": total_hit_count,
+                        },
+                    )
+                    drafted_sections_summary.append(
+                        {
+                            "id": section_id,
+                            "paragraph_count": 0,
+                            "no_evidence": True,
+                        }
+                    )
+                    continue
+
+                self._append_log(
+                    normalized_session_id,
+                    level="info",
+                    message=f"Drafting section {section_id}",
+                    stage_id=draft_stage.stage_id,
+                    payload={
+                        "section_id": section_id,
+                        "total_hit_count": total_hit_count,
+                    },
+                )
+                try:
+                    paragraphs = await report_drafter.draft_section(
+                        section_entry,
+                        llm=llm,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._append_log(
+                        normalized_session_id,
+                        level="error",
+                        message=f"Section drafting failed: {exc}",
+                        stage_id=draft_stage.stage_id,
+                        payload={
+                            "section_id": section_id,
+                            "error": str(exc),
+                        },
+                    )
+                    raise
+
+                for paragraph in paragraphs:
+                    self._store.record_artifact(
+                        normalized_session_id,
+                        stage_id=draft_stage.stage_id,
+                        kind="paragraph_citations",
+                        content={
+                            "section_id": paragraph["section_id"],
+                            "paragraph_index": paragraph["paragraph_index"],
+                            "text": paragraph["text"],
+                            "evidence_manifest": paragraph["evidence_manifest"],
+                            "no_evidence": False,
+                        },
+                    )
+                self._append_log(
+                    normalized_session_id,
+                    level="info",
+                    message=(
+                        f"Section {section_id} drafted with {len(paragraphs)} paragraphs"
+                    ),
+                    stage_id=draft_stage.stage_id,
+                    payload={
+                        "section_id": section_id,
+                        "paragraph_count": len(paragraphs),
+                        "total_hit_count": total_hit_count,
+                    },
+                )
+                drafted_sections_summary.append(
+                    {
+                        "id": section_id,
+                        "paragraph_count": len(paragraphs),
+                        "no_evidence": False,
+                    }
+                )
+
+            self._store.complete_stage(
+                draft_stage.stage_id,
+                summary=(
+                    f"Drafted evidence for {len(drafted_sections_summary)} sections"
+                ),
+            )
+            self._append_log(
+                normalized_session_id,
+                level="info",
+                message="Report section drafting completed",
+                stage_id=draft_stage.stage_id,
+                payload={
+                    "stage_name": DRAFT_REPORT_SECTIONS_STAGE_NAME,
+                    "sections": drafted_sections_summary,
+                },
+            )
+            self._emit_card(
+                handle.queue,
+                session_id=normalized_session_id,
+                stage_id=draft_stage.stage_id,
+                stage_name=DRAFT_REPORT_SECTIONS_STAGE_NAME,
+                kind="stage_completed",
+                message="Report section drafting completed",
+            )
+        except Exception as exc:  # noqa: BLE001
+            failure_stage_id = (
+                draft_stage.stage_id if draft_stage is not None else retrieval_stage.stage_id
+            )
+            failure_stage_name = (
+                DRAFT_REPORT_SECTIONS_STAGE_NAME
+                if draft_stage is not None
+                else RETRIEVE_SECTION_EVIDENCE_STAGE_NAME
+            )
+            self._record_failure(
+                session_id=normalized_session_id,
+                handle=handle,
+                exc=exc,
+                stage_id=failure_stage_id,
+                stage_name=failure_stage_name,
+                should_fail_stage=draft_stage is not None,
+            )
+            raise
+
+        session = self._store.update_session_status(
+            normalized_session_id,
+            "active",
+            current_stage=DRAFT_REPORT_SECTIONS_STAGE_NAME,
+        )
+        return session
     def _record_failure(
         self,
         *,

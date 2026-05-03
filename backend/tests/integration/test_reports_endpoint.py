@@ -6,6 +6,8 @@ import json
 
 from fastapi.testclient import TestClient
 
+from tests._fakes import make_fake_chat_model
+
 
 def _parse_sse_events(blob: str) -> list[tuple[str, str]]:
     blob = blob.replace("\r\n", "\n")
@@ -22,6 +24,12 @@ def _parse_sse_events(blob: str) -> list[tuple[str, str]]:
                 data_lines.append(line.removeprefix("data:").strip())
         events.append((event_name, "\n".join(data_lines)))
     return events
+
+
+def _set_empty_report_draft_llm(client: TestClient) -> None:
+    client.app.state.app_state.llm = make_fake_chat_model(
+        [json.dumps({"paragraphs": []}, ensure_ascii=False)]
+    )
 
 
 def _seed_report_documents(registry) -> None:
@@ -177,6 +185,7 @@ class TestReportGateAnswer:
         launch = client.post("/api/reports", json={})
         session_id = launch.json()["session_id"]
         gate_id = client.app.state.app_state.report_sessions.list_gates(session_id)[0].gate_id
+        _set_empty_report_draft_llm(client)
 
         response = client.post(
             f"/api/reports/{session_id}/gates/{gate_id}/answer",
@@ -188,13 +197,15 @@ class TestReportGateAnswer:
         session = store.get_session(session_id)
         assert session is not None
         assert session.status == "active"
-        assert session.current_stage == "plan_report_sections"
+        assert session.current_stage == "draft_report_sections"
 
         stages = store.list_stages(session_id)
         assert [stage.name for stage in stages] == [
             "bootstrap",
             "inventory_sources",
             "plan_report_sections",
+            "retrieve_section_evidence",
+            "draft_report_sections",
         ]
         gates = store.list_gates(session_id)
         assert gates[0].status == "closed"
@@ -210,6 +221,7 @@ class TestReportGateAnswer:
         launch = client.post("/api/reports", json={})
         session_id = launch.json()["session_id"]
         gate_id = client.app.state.app_state.report_sessions.list_gates(session_id)[0].gate_id
+        _set_empty_report_draft_llm(client)
 
         response = client.post(
             f"/api/reports/{session_id}/gates/{gate_id}/answer",
@@ -221,18 +233,16 @@ class TestReportGateAnswer:
         assert inspection.status_code == 200
 
         body = inspection.json()
-        assert body["current_stage"] == "plan_report_sections"
+        assert body["current_stage"] == "draft_report_sections"
         assert body["session"]["status"] == "active"
-        assert [item["kind"] for item in body["artifacts"]] == [
-            "source_inventory_snapshot",
-            "section_plan",
-        ]
         assert [stage["name"] for stage in body["stages"]] == [
             "bootstrap",
             "inventory_sources",
             "plan_report_sections",
+            "retrieve_section_evidence",
+            "draft_report_sections",
         ]
-        assert len(body["stages"]) == 3
+        assert len(body["stages"]) == 5
         assert body["artifacts"][0]["content"]["totals"] == {
             "indexed": 1,
             "skipped": 1,
@@ -243,6 +253,18 @@ class TestReportGateAnswer:
         }
         assert body["artifacts"][1]["content"]["template_id"] == "general_project_dossier"
         assert len(body["artifacts"][1]["content"]["sections"]) == 14
+        retrieval_artifact = next(
+            artifact for artifact in body["artifacts"] if artifact["kind"] == "other"
+        )
+        paragraph_artifacts = [
+            artifact for artifact in body["artifacts"] if artifact["kind"] == "paragraph_citations"
+        ]
+        active_section_count = sum(
+            1 for section in body["artifacts"][1]["content"]["sections"] if section["active"]
+        )
+        assert retrieval_artifact["content"]["kind"] == "retrieval_manifest"
+        assert len(paragraph_artifacts) == active_section_count
+        assert all(artifact["content"]["no_evidence"] is True for artifact in paragraph_artifacts)
 
     async def test_double_answering_closed_gate_returns_409(self, client: TestClient) -> None:
         launch = client.post("/api/reports", json={})

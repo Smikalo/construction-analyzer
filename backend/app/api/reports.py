@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any, TypeVar
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from langchain_core.language_models import BaseChatModel
 from sse_starlette.sse import EventSourceResponse
 
+from app.kb.base import KnowledgeBase
 from app.schemas import (
     ChatChunk,
     ReportArtifact,
@@ -50,7 +53,13 @@ async def launch_report_session(
         raise HTTPException(status_code=422, detail="session_id must not be empty")
 
     state.pipeline_registry.get_or_create(session_id)
-    pipeline = _build_pipeline(state.pipeline_registry, state.report_sessions, state.registry)
+    pipeline = _build_pipeline(
+        state.pipeline_registry,
+        state.report_sessions,
+        state.registry,
+        state.kb,
+        lambda: state.llm,
+    )
     resumed = state.report_sessions.get_session(session_id) is not None
 
     metadata = dict(req.metadata)
@@ -122,7 +131,13 @@ async def answer_report_gate(
     if gate.status != "open":
         raise HTTPException(status_code=409, detail="report gate is already closed")
 
-    pipeline = _build_pipeline(state.pipeline_registry, state.report_sessions, state.registry)
+    pipeline = _build_pipeline(
+        state.pipeline_registry,
+        state.report_sessions,
+        state.registry,
+        state.kb,
+        lambda: state.llm,
+    )
     try:
         await pipeline.answer_gate(session_id, req.answer, gate_id=gate.gate_id)
     except KeyError as exc:
@@ -176,8 +191,17 @@ def _build_pipeline(
     registry: ReportPipelineRegistry,
     store: ReportSessionStore,
     document_registry: DocumentRegistry,
+    kb: KnowledgeBase,
+    llm_factory: Callable[[], BaseChatModel],
 ) -> ReportPipeline:
-    return ReportPipeline(store=store, registry=document_registry, registry_pipeline=registry)
+    """Build a report pipeline for the current app state."""
+    return ReportPipeline(
+        store=store,
+        registry=document_registry,
+        kb=kb,
+        llm_factory=llm_factory,
+        registry_pipeline=registry,
+    )
 
 
 def _find_gate(
