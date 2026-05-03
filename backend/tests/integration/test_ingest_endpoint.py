@@ -9,6 +9,9 @@ from pathlib import Path
 import docx
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
+from openpyxl.comments import Comment
+from openpyxl.worksheet.table import Table
 
 from app.agent.tools import build_kb_tools
 from app.config import Settings
@@ -73,6 +76,28 @@ def _build_visual_analyzer(
         client=analysis_client,
     )
     return analyzer, analysis_client
+
+
+def _build_xlsx_workbook_bytes() -> bytes:
+    workbook = Workbook()
+    visible_sheet = workbook.active
+    visible_sheet.title = "Loads"
+    visible_sheet["A1"] = "Region"
+    visible_sheet["B1"] = "Load [kN]"
+    visible_sheet["A2"] = "North [kN]"
+    visible_sheet["B2"] = 12
+    visible_sheet["C2"] = "=SUM(B2:B2)"
+    visible_sheet["C2"].comment = Comment("Needs review", "Planner")
+    visible_sheet.add_table(Table(displayName="LoadTable", ref="A1:B2"))
+
+    hidden_sheet = workbook.create_sheet("Hidden Notes")
+    hidden_sheet["A1"] = "Internal note"
+    hidden_sheet.sheet_state = "hidden"
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 class TestIngestEndpoint:
@@ -288,13 +313,6 @@ class TestIngestEndpoint:
         ("filename", "content_type", "reason", "body_bytes"),
         [
             pytest.param(
-                "loads.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "xlsx_extractor_pending",
-                b"xlsx body",
-                id="xlsx",
-            ),
-            pytest.param(
                 "north.dwg",
                 "application/acad",
                 "converter_pending",
@@ -343,6 +361,145 @@ class TestIngestEndpoint:
         assert record.memory_ids == []
         assert Path(record.stored_path).exists()
         assert Path(record.stored_path).read_bytes() == body_bytes
+
+    def test_uploads_xlsx_emits_summary_sheet_formula_value_comment_and_table_memories(
+        self,
+        client: TestClient,
+        fake_kb: FakeKB,
+        tmp_path: Path,
+    ) -> None:
+        client.app.state.app_state.settings.documents_dir = str(tmp_path)
+        body_bytes = _build_xlsx_workbook_bytes()
+
+        response = client.post(
+            "/api/ingest",
+            files=[
+                (
+                    "files",
+                    (
+                        "loads.xlsx",
+                        io.BytesIO(body_bytes),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ),
+                )
+            ],
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ingested_files"] == 1
+        assert body["ingested_chunks"] == len(body["memory_ids"])
+        assert body["memory_ids"]
+
+        records = fake_kb.dump()
+        assert body["memory_ids"] == [record["id"] for record in records]
+        assert len(records) == len(body["memory_ids"])
+
+        registry_record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(body_bytes).hexdigest()
+        )
+        assert registry_record is not None
+        assert registry_record.status == "indexed"
+        assert registry_record.error is None
+        assert registry_record.memory_ids == body["memory_ids"]
+        assert Path(registry_record.stored_path).exists()
+        assert Path(registry_record.stored_path).parent == tmp_path
+
+        assert all(record["metadata"]["source"] == "loads.xlsx" for record in records)
+        assert all(
+            record["metadata"]["document_id"] == registry_record.document_id for record in records
+        )
+        assert all(record["metadata"]["path"] == registry_record.stored_path for record in records)
+        assert all(record["content"].startswith("[source=loads.xlsx;") for record in records)
+
+        modes = [record["metadata"]["extraction_mode"] for record in records]
+        assert {
+            "xlsx_summary",
+            "xlsx_sheet_summary",
+            "xlsx_cell",
+            "xlsx_formula",
+            "xlsx_comment",
+            "xlsx_table",
+        } <= set(modes)
+        assert modes.count("xlsx_sheet_summary") == 2
+
+        summary_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "xlsx_summary"
+        )
+        assert summary_record["metadata"]["sheet_count"] == 2
+        assert summary_record["metadata"]["xlsx_sheets"] == ["Loads", "Hidden Notes"]
+        assert summary_record["metadata"]["xlsx_visible_sheet_count"] == 1
+        assert summary_record["metadata"]["xlsx_hidden_sheet_count"] == 1
+        assert summary_record["content"].startswith(
+            "[source=loads.xlsx; element=file_summary; extraction=xlsx_summary; confidence=1.0]"
+        )
+
+        sheet_summaries = [
+            record
+            for record in records
+            if record["metadata"]["extraction_mode"] == "xlsx_sheet_summary"
+        ]
+        assert len(sheet_summaries) == 2
+        visible_sheet_summary = next(
+            record for record in sheet_summaries if record["metadata"]["xlsx_sheet"] == "Loads"
+        )
+        hidden_sheet_summary = next(
+            record
+            for record in sheet_summaries
+            if record["metadata"]["xlsx_sheet"] == "Hidden Notes"
+        )
+        assert visible_sheet_summary["metadata"]["xlsx_sheet_state"] == "visible"
+        assert visible_sheet_summary["metadata"]["xlsx_range"] == "A1:C2"
+        assert hidden_sheet_summary["metadata"]["xlsx_sheet_state"] == "hidden"
+
+        cell_record = next(
+            record
+            for record in records
+            if record["metadata"]["extraction_mode"] == "xlsx_cell"
+            and record["metadata"]["xlsx_cell"] == "B2"
+        )
+        assert cell_record["content"].startswith(
+            "[source=loads.xlsx; element=cell; extraction=xlsx_cell; confidence=1.0]"
+        )
+        assert cell_record["metadata"]["xlsx_sheet"] == "Loads"
+        assert cell_record["metadata"]["xlsx_row_label"] == "North [kN]"
+        assert cell_record["metadata"]["xlsx_column_label"] == "Load [kN]"
+        assert cell_record["metadata"]["xlsx_label"] == "North [kN]"
+        assert cell_record["metadata"]["xlsx_unit"] == "kN"
+        assert cell_record["metadata"]["xlsx_value"] == 12
+        assert cell_record["metadata"]["xlsx_value_kind"] == "literal"
+
+        formula_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "xlsx_formula"
+        )
+        assert formula_record["content"].startswith(
+            "[source=loads.xlsx; element=formula; extraction=xlsx_formula; confidence=1.0;"
+        )
+        assert "warnings=missing_cached_value" in formula_record["content"]
+        assert formula_record["metadata"]["xlsx_formula"] == "=SUM(B2:B2)"
+        assert formula_record["metadata"]["xlsx_value_kind"] == "missing_cached_value"
+        assert formula_record["metadata"]["warnings"] == ["missing_cached_value"]
+
+        comment_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "xlsx_comment"
+        )
+        assert comment_record["content"].startswith(
+            "[source=loads.xlsx; element=comment; extraction=xlsx_comment; confidence=1.0]"
+        )
+        assert comment_record["metadata"]["xlsx_comment_author"] == "Planner"
+        assert comment_record["metadata"]["xlsx_comment_text"] == "Needs review"
+
+        table_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "xlsx_table"
+        )
+        assert table_record["content"].startswith(
+            "[source=loads.xlsx; element=table; extraction=xlsx_table; confidence=1.0]"
+        )
+        assert table_record["metadata"]["xlsx_sheet"] == "Loads"
+        assert table_record["metadata"]["xlsx_range"] == "A1:B2"
+        assert table_record["metadata"]["xlsx_table_name"] == "LoadTable"
+        assert table_record["metadata"]["table_rows"] == 2
+        assert table_record["metadata"]["table_columns"] == 2
 
     def test_pdf_md_txt_uploads_unaffected_by_classifier(
         self,
@@ -466,6 +623,59 @@ class TestIngestEndpoint:
         assert record.error == "boom"
         assert record.memory_ids == []
         assert fake_kb.dump() == []
+
+    def test_corrupt_xlsx_upload_marks_registry_failed_and_continues_batch(
+        self,
+        client: TestClient,
+        fake_kb: FakeKB,
+        tmp_path: Path,
+    ) -> None:
+        client.app.state.app_state.settings.documents_dir = str(tmp_path)
+        bad_xlsx_body = b"not a real workbook"
+        valid_body = b"batch text"
+
+        response = client.post(
+            "/api/ingest",
+            files=[
+                (
+                    "files",
+                    (
+                        "bad.xlsx",
+                        io.BytesIO(bad_xlsx_body),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ),
+                ),
+                ("files", ("valid.txt", io.BytesIO(valid_body), "text/plain")),
+            ],
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ingested_files"] == 1
+        assert body["ingested_chunks"] == 1
+        assert len(body["memory_ids"]) == 1
+
+        records = fake_kb.dump()
+        assert len(records) == 1
+        assert body["memory_ids"] == [record["id"] for record in records]
+
+        text_record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(valid_body).hexdigest()
+        )
+        assert text_record is not None
+        assert text_record.status == "indexed"
+        assert text_record.error is None
+        assert text_record.memory_ids == body["memory_ids"]
+        assert Path(text_record.stored_path).exists()
+
+        xlsx_record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(bad_xlsx_body).hexdigest()
+        )
+        assert xlsx_record is not None
+        assert xlsx_record.status == "failed"
+        assert xlsx_record.error
+        assert xlsx_record.memory_ids == []
+        assert Path(xlsx_record.stored_path).exists()
 
     def test_uploads_multi_page_pdf_emits_per_page_memories_with_inline_provenance(
         self,

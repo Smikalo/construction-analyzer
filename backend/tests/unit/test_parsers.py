@@ -6,6 +6,7 @@ from pathlib import Path
 
 import docx
 import pytest
+from openpyxl import Workbook
 
 import app.services.parsers as parsers
 
@@ -102,6 +103,32 @@ def test_parse_document_dispatches_docx_to_extract_docx(tmp_path: Path) -> None:
     assert any(element.extraction_mode == "docx_summary" for element in elements)
     assert any(element.extraction_mode == "docx_heading" for element in elements)
     assert any(element.extraction_mode == "docx_paragraph" for element in elements)
+
+
+def test_parse_document_dispatches_xlsx_to_extract_xlsx(tmp_path: Path) -> None:
+    path = tmp_path / "dispatch.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Loads"
+    sheet["A1"] = "Alpha"
+    workbook.save(path)
+
+    elements = parsers.parse_document(
+        str(path),
+        source="dispatch.xlsx",
+        document_id="dispatch-xlsx",
+    )
+
+    assert len(elements) >= 3
+    assert {element.document_id for element in elements} == {"dispatch-xlsx"}
+    assert {element.source for element in elements} == {"dispatch.xlsx"}
+    assert {element.path for element in elements} == {str(path)}
+    assert any(element.extraction_mode == "xlsx_summary" for element in elements)
+    assert any(element.extraction_mode == "xlsx_sheet_summary" for element in elements)
+    assert any(
+        element.extraction_mode == "xlsx_cell" and element.metadata["xlsx_value"] == "Alpha"
+        for element in elements
+    )
 
 
 def test_empty_pdf_returns_no_elements(

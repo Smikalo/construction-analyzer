@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook
 
 from app.kb.fake import FakeKB
 from app.services import ingestion as ingestion_module
@@ -899,7 +900,6 @@ class TestIngestDirectory:
     ) -> None:
         top_body = b"top level text"
         pdf_body = b"%PDF-1.7\nplan"
-        xlsx_body = b"xlsx body"
         dwg_body = b"dwg body"
         archive_body = b"old archived text"
         bin_body = b"\x00\x01\x02\x03"
@@ -912,9 +912,15 @@ class TestIngestDirectory:
         hidden_dir = tmp_path / ".git"
         hidden_dir.mkdir()
 
+        xlsx_path = nested_dir / "sheet.xlsx"
+        workbook = Workbook()
+        workbook.active.title = "Loads"
+        workbook.active["A1"] = "Folder workbook"
+        workbook.save(xlsx_path)
+        xlsx_body = xlsx_path.read_bytes()
+
         (tmp_path / "top.txt").write_bytes(top_body)
         (nested_dir / "plan.pdf").write_bytes(pdf_body)
-        (nested_dir / "sheet.xlsx").write_bytes(xlsx_body)
         (nested_dir / "north.dwg").write_bytes(dwg_body)
         (archive_dir / "old.txt").write_bytes(archive_body)
         (tmp_path / "mystery.bin").write_bytes(bin_body)
@@ -927,6 +933,13 @@ class TestIngestDirectory:
             document_id: str | None = None,
         ) -> list[DocumentElement]:
             assert document_id is not None
+            if parser_path == str(xlsx_path):
+                assert source == "sheet.xlsx"
+                return ingestion_module.parsers.parse_xlsx(
+                    parser_path,
+                    source=source,
+                    document_id=document_id,
+                )
             if parser_path == str(nested_dir / "plan.pdf"):
                 assert source == "plan.pdf"
                 return [
@@ -960,9 +973,9 @@ class TestIngestDirectory:
         async with lifespan_document_registry(":memory:") as registry:
             result = await ingest_directory(kb, registry, str(tmp_path))
 
-            assert result.ingested_files == 2
-            assert result.ingested_chunks >= 2
-            assert len(kb.dump()) == 2
+            assert result.ingested_files == 3
+            assert result.ingested_chunks == 5
+            assert len(kb.dump()) == 5
 
             top_record = registry.get_by_hash(hashlib.sha256(top_body).hexdigest())
             assert top_record is not None
@@ -980,10 +993,11 @@ class TestIngestDirectory:
 
             xlsx_record = registry.get_by_hash(hashlib.sha256(xlsx_body).hexdigest())
             assert xlsx_record is not None
-            assert xlsx_record.status == "skipped"
-            assert xlsx_record.error == "xlsx_extractor_pending"
+            assert xlsx_record.status == "indexed"
+            assert xlsx_record.error is None
             assert xlsx_record.original_filename == "sheet.xlsx"
             assert Path(xlsx_record.stored_path).parent == nested_dir
+            assert len(xlsx_record.memory_ids) == 3
 
             dwg_record = registry.get_by_hash(hashlib.sha256(dwg_body).hexdigest())
             assert dwg_record is not None

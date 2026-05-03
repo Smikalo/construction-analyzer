@@ -90,6 +90,18 @@ def parse_docx(
     return extract_docx(path, source=source, document_id=document_id)
 
 
+def parse_xlsx(
+    path: str,
+    *,
+    source: str,
+    document_id: str | None = None,
+) -> list[DocumentElement]:
+    """Parse an XLSX workbook into typed elements via the XLSX extractor."""
+    from app.services.xlsx_elements import extract_xlsx
+
+    return extract_xlsx(path, source=source, document_id=document_id)
+
+
 def parse_document(
     path: str,
     *,
@@ -102,6 +114,8 @@ def parse_document(
         return parse_pdf(path, source=source, document_id=document_id)
     if ext == ".docx":
         return parse_docx(path, source=source, document_id=document_id)
+    if ext == ".xlsx":
+        return parse_xlsx(path, source=source, document_id=document_id)
     if ext in (".md", ".markdown"):
         return parse_markdown(path, source=source, document_id=document_id)
     if ext == ".txt":
@@ -141,4 +155,5 @@ __all__ = [
     "parse_markdown",
     "parse_pdf",
     "parse_text",
+    "parse_xlsx",
 ]

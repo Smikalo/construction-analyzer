@@ -42,8 +42,8 @@ from app.services.engineering_files import (
             "sheet.xlsx",
             ClassificationResult(
                 role="engineering_workbook",
-                route="skip",
-                reason="xlsx_extractor_pending",
+                route="parser",
+                reason=None,
                 extension=".xlsx",
             ),
         ),
