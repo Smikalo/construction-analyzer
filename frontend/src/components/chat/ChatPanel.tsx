@@ -1,9 +1,11 @@
 "use client";
 
-import { useState, type KeyboardEvent } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { useChatStore } from "@/lib/store";
 import type { Message as MessageType } from "@/types";
+import { ReportCard } from "./ReportCard";
+import { ReportGateForm } from "./ReportGateForm";
 
 function stripCitationMarkers(text: string): string {
   return text.replace(/\[node:[^\]]+\]/g, "").replace(/\s{2,}/g, " ").trim();
@@ -27,8 +29,8 @@ function ChatBubble({ m }: { m: MessageType }) {
           isUser
             ? "bg-brand-blue text-white"
             : m.role === "assistant"
-              ? "bg-white text-brand-ink shadow-sm border border-brand-line"
-              : "bg-brand-surface-soft text-brand-subtle border border-brand-line"
+              ? "border border-brand-line bg-white text-brand-ink shadow-sm"
+              : "border border-brand-line bg-brand-surface-soft text-brand-subtle"
         }`}
       >
         {display || (m.pending ? <TypingDots /> : null)}
@@ -55,10 +57,37 @@ function TypingDots() {
 
 export function ChatPanel() {
   const messages = useChatStore((s) => s.messages);
+  const activeReportId = useChatStore((s) => s.activeReportId);
+  const reportStatus = useChatStore((s) => s.reportStatus);
+  const reportCards = useChatStore((s) => s.reportCards);
+  const currentGate = useChatStore((s) => s.currentGate);
+  const launchReport = useChatStore((s) => s.launchReport);
+  const hydrateReportFromStorage = useChatStore(
+    (s) => s.hydrateReportFromStorage,
+  );
   const sendMockChat = useChatStore((s) => s.sendMockChat);
   const setChatHighlights = useChatStore((s) => s.setChatHighlights);
   const chatHighlights = useChatStore((s) => s.chatHighlights);
   const [value, setValue] = useState("");
+  const [isLaunching, setIsLaunching] = useState(false);
+  const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    void hydrateReportFromStorage().catch(() => undefined);
+  }, [hydrateReportFromStorage]);
+
+  useEffect(() => {
+    scrollAnchorRef.current?.scrollIntoView?.({ block: "end" });
+  }, [messages.length, reportCards.length, currentGate?.gate_id]);
+
+  const isReportRunning =
+    activeReportId !== null &&
+    ["active", "blocked", "pending"].includes(reportStatus ?? "");
+  const hasTimelineContent =
+    messages.length > 0 ||
+    reportCards.length > 0 ||
+    currentGate !== null ||
+    activeReportId !== null;
 
   const submit = () => {
     const t = value.trim();
@@ -74,17 +103,42 @@ export function ChatPanel() {
     }
   };
 
+  const onLaunchReport = async () => {
+    if (isLaunching || isReportRunning) return;
+    setIsLaunching(true);
+    try {
+      await launchReport();
+    } catch {
+      // The store records report launch failures for inspection.
+    } finally {
+      setIsLaunching(false);
+    }
+  };
+
   return (
     <aside
       data-testid="chat-panel"
       className="flex h-full w-[360px] flex-col border-l border-brand-line bg-brand-surface-soft"
     >
-      <div className="flex h-9 items-center justify-between border-b border-brand-line bg-white px-3">
-        <span className="text-[12px] font-semibold text-brand-navy">
-          bob-assistant
-        </span>
+      <div className="flex h-10 items-center justify-between border-b border-brand-line bg-white px-3">
+        <div className="flex items-center gap-2">
+          <span className="text-[12px] font-semibold text-brand-navy">
+            bob-assistant
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              void onLaunchReport();
+            }}
+            disabled={isLaunching || isReportRunning}
+            className="inline-flex min-h-10 items-center rounded-full border border-brand-line bg-brand-surface-soft px-3 text-[10.5px] font-medium text-brand-blue transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Build Report
+          </button>
+        </div>
         {chatHighlights.nodeIds.length > 0 && (
           <button
+            type="button"
             onClick={() => setChatHighlights([])}
             className="text-[10.5px] font-medium text-brand-blue hover:underline"
           >
@@ -94,7 +148,7 @@ export function ChatPanel() {
       </div>
 
       <div className="flex-1 overflow-y-auto py-2">
-        {messages.length === 0 && (
+        {!hasTimelineContent ? (
           <div className="px-4 pt-6 text-center text-[12px] text-brand-subtle">
             <div className="mx-auto mb-2 inline-flex h-9 w-9 items-center justify-center rounded-xl bg-brand-blue text-white shadow">
               ✦
@@ -106,12 +160,26 @@ export function ChatPanel() {
               e.g. "Which bob-files relate to the bob-foundation?"
             </div>
           </div>
+        ) : (
+          <>
+            <AnimatePresence initial={false}>
+              {messages.map((m) => (
+                <ChatBubble key={m.id} m={m} />
+              ))}
+            </AnimatePresence>
+
+            {reportCards.map((card, index) => (
+              <ReportCard
+                key={`${card.session_id}-${card.stage_id}-${card.kind}-${card.created_at}-${index}`}
+                card={card}
+              />
+            ))}
+
+            {currentGate && <ReportGateForm key={currentGate.gate_id} gate={currentGate} />}
+
+            <div ref={scrollAnchorRef} />
+          </>
         )}
-        <AnimatePresence initial={false}>
-          {messages.map((m) => (
-            <ChatBubble key={m.id} m={m} />
-          ))}
-        </AnimatePresence>
       </div>
 
       <div className="border-t border-brand-line bg-white p-2">
