@@ -26,9 +26,14 @@ def _parse_sse_events(blob: str) -> list[tuple[str, str]]:
     return events
 
 
+def _set_report_draft_llm(client: TestClient, payloads: list[str]) -> None:
+    client.app.state.app_state.llm = make_fake_chat_model(payloads)
+
+
 def _set_empty_report_draft_llm(client: TestClient) -> None:
-    client.app.state.app_state.llm = make_fake_chat_model(
-        [json.dumps({"paragraphs": []}, ensure_ascii=False)]
+    _set_report_draft_llm(
+        client,
+        [json.dumps({"paragraphs": []}, ensure_ascii=False)],
     )
 
 
@@ -49,9 +54,7 @@ def _seed_report_documents(registry) -> None:
         document_id="doc-failed",
         original_filename="calc.xlsx",
         stored_path="/app/data/documents/doc-failed.xlsx",
-        content_type=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
+        content_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         byte_size=456,
         uploaded_at="2026-05-01T11:00:00+00:00",
     )
@@ -67,6 +70,36 @@ def _seed_report_documents(registry) -> None:
         uploaded_at="2026-05-01T12:00:00+00:00",
     )
     registry.mark_skipped(skipped_record.document_id, reason="image_extractor_pending")
+
+
+def _seed_indexed_text_document(registry) -> str:
+    indexed_record, _ = registry.register_or_get(
+        "hash-indexed-report",
+        document_id="doc-indexed-report",
+        original_filename="site-report.txt",
+        stored_path="/app/data/documents/doc-indexed-report.txt",
+        content_type="text/plain",
+        byte_size=123,
+        uploaded_at="2026-05-01T10:00:00+00:00",
+    )
+    registry.update_status(indexed_record.document_id, "indexed")
+    return indexed_record.document_id
+
+
+async def _seed_recalled_memory(kb) -> str:
+    provenance_header = "[source=report.pdf; page=2; element=paragraph; extraction=text]"
+    memory_content = (
+        f"{provenance_header}\n"
+        "Texte Unterlagen Aufgabenstellung und Berichtszweck "
+        "— Aufgabenstellung Bauwerk"
+    )
+    return await kb.remember(
+        memory_content,
+        metadata={
+            "document_id": "doc-hit",
+            "source": "report.pdf",
+        },
+    )
 
 
 class TestReportLaunch:
@@ -145,9 +178,7 @@ class TestReportInspection:
         body = response.json()
         assert [item["artifact_id"] for item in body["artifacts"]] == [artifact.artifact_id]
         assert [item["kind"] for item in body["artifacts"]] == ["section_plan"]
-        assert [item["finding_id"] for item in body["validation_findings"]] == [
-            finding.finding_id
-        ]
+        assert [item["finding_id"] for item in body["validation_findings"]] == [finding.finding_id]
         assert [item["severity"] for item in body["validation_findings"]] == ["warning"]
         assert [item["export_id"] for item in body["exports"]] == [export.export_id]
         assert [item["status"] for item in body["exports"]] == ["ready"]
@@ -266,6 +297,130 @@ class TestReportGateAnswer:
         assert len(paragraph_artifacts) == active_section_count
         assert all(artifact["content"]["no_evidence"] is True for artifact in paragraph_artifacts)
 
+    async def test_general_project_dossier_run_produces_paragraph_citations(
+        self,
+        client: TestClient,
+    ) -> None:
+        registry = client.app.state.app_state.registry
+        _seed_indexed_text_document(registry)
+        memory_id = await _seed_recalled_memory(client.app.state.app_state.kb)
+
+        payload = json.dumps(
+            {
+                "paragraphs": [
+                    {
+                        "text": f"Beispielabsatz [evidence_id={memory_id}]",
+                        "evidence_ids": [memory_id],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+        llm = make_fake_chat_model([payload] * 4)
+        client.app.state.app_state.llm = llm
+
+        launch = client.post("/api/reports", json={})
+        session_id = launch.json()["session_id"]
+        gate_id = client.app.state.app_state.report_sessions.list_gates(session_id)[0].gate_id
+
+        response = client.post(
+            f"/api/reports/{session_id}/gates/{gate_id}/answer",
+            json={"answer": {"choice": "general_project_dossier"}},
+        )
+        assert response.status_code == 204
+
+        inspection = client.get(f"/api/reports/{session_id}")
+        assert inspection.status_code == 200
+
+        body = inspection.json()
+        stage_statuses = {stage["name"]: stage["status"] for stage in body["stages"]}
+        retrieval_manifest = next(
+            artifact for artifact in body["artifacts"] if artifact["kind"] == "other"
+        )
+        paragraph_artifacts = [
+            artifact for artifact in body["artifacts"] if artifact["kind"] == "paragraph_citations"
+        ]
+        evidence_artifact = next(
+            artifact for artifact in paragraph_artifacts if artifact["content"]["evidence_manifest"]
+        )
+        retrieval_section = next(
+            section
+            for section in retrieval_manifest["content"]["sections"]
+            if section["id"] == "aufgabenstellung"
+        )
+        hit_section_ids = [
+            section["id"]
+            for section in retrieval_manifest["content"]["sections"]
+            if section["total_hit_count"] > 0
+        ]
+
+        assert body["session"]["status"] == "active"
+        assert body["current_stage"] == "draft_report_sections"
+        assert stage_statuses["retrieve_section_evidence"] == "complete"
+        assert stage_statuses["draft_report_sections"] == "complete"
+        assert retrieval_manifest["content"]["kind"] == "retrieval_manifest"
+        assert hit_section_ids == ["aufgabenstellung"]
+        assert retrieval_section["total_hit_count"] == 1
+        assert retrieval_section["recalled_memories"][0]["id"] == memory_id
+        assert evidence_artifact["content"]["section_id"] == "aufgabenstellung"
+        assert evidence_artifact["content"]["text"] == (f"Beispielabsatz [evidence_id={memory_id}]")
+        assert evidence_artifact["content"]["evidence_manifest"] == [
+            {
+                "memory_id": memory_id,
+                "provenance": "[source=report.pdf; page=2; element=paragraph; extraction=text]",
+            }
+        ]
+        assert llm.call_count == 1
+
+    async def test_general_project_dossier_run_marks_zero_evidence_sections(
+        self,
+        client: TestClient,
+    ) -> None:
+        llm = make_fake_chat_model([])
+        client.app.state.app_state.llm = llm
+
+        launch = client.post("/api/reports", json={})
+        session_id = launch.json()["session_id"]
+        gate_id = client.app.state.app_state.report_sessions.list_gates(session_id)[0].gate_id
+
+        response = client.post(
+            f"/api/reports/{session_id}/gates/{gate_id}/answer",
+            json={"answer": {"choice": "general_project_dossier"}},
+        )
+        assert response.status_code == 204
+
+        inspection = client.get(f"/api/reports/{session_id}")
+        assert inspection.status_code == 200
+
+        body = inspection.json()
+        section_plan = next(
+            artifact for artifact in body["artifacts"] if artifact["kind"] == "section_plan"
+        )
+        active_section_ids = [
+            section["id"] for section in section_plan["content"]["sections"] if section["active"]
+        ]
+        paragraph_artifacts = [
+            artifact for artifact in body["artifacts"] if artifact["kind"] == "paragraph_citations"
+        ]
+        warning_logs = [log for log in body["recent_logs"] if log["level"] == "warning"]
+        stage_statuses = {stage["name"]: stage["status"] for stage in body["stages"]}
+
+        assert body["session"]["status"] == "active"
+        assert body["current_stage"] == "draft_report_sections"
+        assert stage_statuses["retrieve_section_evidence"] == "complete"
+        assert stage_statuses["draft_report_sections"] == "complete"
+        assert len(paragraph_artifacts) == len(active_section_ids)
+        assert sorted(
+            artifact["content"]["section_id"] for artifact in paragraph_artifacts
+        ) == sorted(active_section_ids)
+        assert all(artifact["content"]["no_evidence"] is True for artifact in paragraph_artifacts)
+        assert warning_logs
+        assert any(
+            log["message"].startswith("Section ") and "drafted with no evidence" in log["message"]
+            for log in warning_logs
+        )
+        assert llm.call_count == 0
+
     async def test_double_answering_closed_gate_returns_409(self, client: TestClient) -> None:
         launch = client.post("/api/reports", json={})
         session_id = launch.json()["session_id"]
@@ -311,13 +466,11 @@ class TestReportStream:
         events = _parse_sse_events(body)
         payloads = [json.loads(data) for event, data in events if event == "message" and data]
         assert any(
-            payload["type"] == "report_card"
-            and payload["payload"]["kind"] == "stage_started"
+            payload["type"] == "report_card" and payload["payload"]["kind"] == "stage_started"
             for payload in payloads
         )
         assert any(
-            payload["type"] == "report_gate"
-            and payload["payload"]["status"] == "open"
+            payload["type"] == "report_gate" and payload["payload"]["status"] == "open"
             for payload in payloads
         )
 

@@ -21,12 +21,12 @@ from app.agent.checkpointer import lifespan_checkpointer
 from app.agent.graph import build_graph
 from app.agent.llm import get_llm
 from app.api import chat, health, ingest, reports, threads
-from app.services.report_pipeline import ReportPipelineRegistry
 from app.config import Settings, get_settings
 from app.kb.base import KnowledgeBase
 from app.services.document_analysis import DocumentAnalyzer, build_document_analyzer
 from app.services.document_registry import DocumentRegistry, lifespan_document_registry
 from app.services.engineering_converters import EngineeringConverter, get_engineering_converter
+from app.services.report_pipeline import ReportPipelineRegistry
 from app.services.report_sessions import ReportSessionStore, lifespan_report_sessions
 
 
