@@ -123,6 +123,86 @@ class TestDocumentRegistry:
             assert skipped.memory_ids == []
             assert registry.get_by_id(record.document_id) == skipped
 
+    async def test_list_all_returns_empty_sequence_when_no_documents(self) -> None:
+        async with lifespan_document_registry(":memory:") as registry:
+            assert registry.list_all() == []
+
+    async def test_list_all_returns_indexed_skipped_and_failed_rows(self) -> None:
+        async with lifespan_document_registry(":memory:") as registry:
+            indexed_record, _ = registry.register_or_get(
+                "hash-indexed",
+                document_id="doc-indexed",
+                original_filename="indexed.txt",
+                stored_path="/app/data/documents/doc-indexed.txt",
+                content_type="text/plain",
+                byte_size=10,
+                uploaded_at="2026-05-01T10:00:00+00:00",
+            )
+            skipped_record, _ = registry.register_or_get(
+                "hash-skipped",
+                document_id="doc-skipped",
+                original_filename="skipped.txt",
+                stored_path="/app/data/documents/doc-skipped.txt",
+                content_type="text/plain",
+                byte_size=11,
+                uploaded_at="2026-05-01T11:00:00+00:00",
+            )
+            failed_record, _ = registry.register_or_get(
+                "hash-failed",
+                document_id="doc-failed",
+                original_filename="failed.txt",
+                stored_path="/app/data/documents/doc-failed.txt",
+                content_type="text/plain",
+                byte_size=12,
+                uploaded_at="2026-05-01T12:00:00+00:00",
+            )
+
+            indexed = registry.update_status(
+                indexed_record.document_id,
+                "indexed",
+                memory_ids=["memory-indexed"],
+            )
+            skipped = registry.mark_skipped(
+                skipped_record.document_id,
+                reason="docx_extractor_pending",
+            )
+            failed = registry.update_status(
+                failed_record.document_id,
+                "failed",
+                error="parser boom",
+            )
+
+            assert registry.list_all() == [indexed, skipped, failed]
+            assert indexed.error is None
+            assert indexed.memory_ids == ["memory-indexed"]
+            assert skipped.error == "docx_extractor_pending"
+            assert skipped.memory_ids == []
+            assert failed.error == "parser boom"
+            assert failed.memory_ids == []
+
+    async def test_list_all_orders_by_uploaded_at_then_document_id(self) -> None:
+        async with lifespan_document_registry(":memory:") as registry:
+            later_record, _ = registry.register_or_get(
+                "hash-later",
+                document_id="doc-z",
+                original_filename="later.txt",
+                stored_path="/app/data/documents/doc-z.txt",
+                content_type="text/plain",
+                byte_size=20,
+                uploaded_at="2026-05-01T10:00:00+00:00",
+            )
+            earlier_record, _ = registry.register_or_get(
+                "hash-earlier",
+                document_id="doc-a",
+                original_filename="earlier.txt",
+                stored_path="/app/data/documents/doc-a.txt",
+                content_type="text/plain",
+                byte_size=21,
+                uploaded_at="2026-05-01T10:00:00+00:00",
+            )
+
+            assert registry.list_all() == [earlier_record, later_record]
+
     async def test_mark_skipped_rejects_blank_reason(self) -> None:
         async with lifespan_document_registry(":memory:") as registry:
             record, _ = registry.register_or_get(
