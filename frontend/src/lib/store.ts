@@ -1,5 +1,20 @@
 import { create } from "zustand";
-import type { Message, Role } from "@/types";
+import {
+  answerReportGate,
+  createOrResumeReportSession,
+  getReportSession,
+  streamReportSession,
+} from "@/lib/api";
+import type {
+  JsonObject,
+  Message,
+  ReportCardPayload,
+  ReportGatePayload,
+  ReportSessionInspectionResponse,
+  ReportSessionLaunchResponse,
+  ReportSessionStatus,
+  Role,
+} from "@/types";
 import {
   initialEdges,
   initialFiles,
@@ -21,6 +36,7 @@ import {
 } from "@/lib/mock";
 
 export const THREAD_STORAGE_KEY = "construction-analyzer.thread_id";
+export const REPORT_STORAGE_KEY = "construction-analyzer.report_id";
 
 export type ConnectionStatus = "unknown" | "ready" | "degraded" | "offline";
 
@@ -29,6 +45,11 @@ export type OnboardingStep = "step1" | "step2" | "step3" | "ready";
 type State = {
   messages: Message[];
   threadId: string | null;
+  activeReportId: string | null;
+  reportStatus: ReportSessionStatus | null;
+  reportCards: ReportCardPayload[];
+  currentGate: ReportGatePayload | null;
+  reportError: string | null;
   status: ConnectionStatus;
 
   // Onboarding
@@ -68,6 +89,9 @@ type Actions = {
   setThreadId: (id: string | null) => void;
   hydrateThreadIdFromStorage: () => void;
   clearThread: () => void;
+  launchReport: () => Promise<ReportSessionLaunchResponse>;
+  submitReportGateAnswer: (answer: JsonObject) => Promise<void>;
+  hydrateReportFromStorage: () => Promise<void>;
   appendUserMessage: (content: string) => string;
   startAssistantMessage: () => string;
   appendAssistantToken: (id: string, token: string) => void;
@@ -121,6 +145,11 @@ type Actions = {
 const INITIAL: State = {
   messages: [],
   threadId: null,
+  activeReportId: null,
+  reportStatus: null,
+  reportCards: [] as ReportCardPayload[],
+  currentGate: null,
+  reportError: null,
   status: "unknown",
 
   onboardingStep: "step1",
@@ -153,6 +182,127 @@ const newId = () =>
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2);
 
+function readStoredReportId(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(REPORT_STORAGE_KEY);
+}
+
+function persistReportId(reportId: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(REPORT_STORAGE_KEY, reportId);
+}
+
+function normalizeReportError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return typeof error === "string" ? error : "Unknown report error";
+}
+
+function readTextField(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function formatReportLabel(name: string): string {
+  const normalized = name.replace(/_/g, " ").trim();
+  if (!normalized) return "Report";
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function buildReportCardsFromInspection(
+  snapshot: ReportSessionInspectionResponse,
+): ReportCardPayload[] {
+  const stageById = new Map(snapshot.stages.map((stage) => [stage.stage_id, stage]));
+  const cards: ReportCardPayload[] = [];
+
+  for (const log of snapshot.recent_logs) {
+    const stage = log.stage_id ? stageById.get(log.stage_id) ?? null : null;
+    const stageName =
+      readTextField(log.payload["stage_name"]) ??
+      stage?.name ??
+      snapshot.current_stage ??
+      "unknown";
+    const stageLabel = formatReportLabel(stageName);
+
+    if (log.message === "Report pipeline failed") {
+      cards.push({
+        session_id: log.session_id,
+        stage_id: log.stage_id ?? snapshot.session.session_id,
+        stage_name: stageName,
+        kind: "failure",
+        message:
+          readTextField(log.payload["error"]) ?? snapshot.session.last_error ?? log.message,
+        created_at: log.created_at,
+        payload: log.payload,
+      });
+      continue;
+    }
+
+    if (log.message.endsWith("stage started")) {
+      cards.push({
+        session_id: log.session_id,
+        stage_id: log.stage_id ?? snapshot.session.session_id,
+        stage_name: stageName,
+        kind: "stage_started",
+        message: `${stageLabel} stage started`,
+        created_at: log.created_at,
+        payload: log.payload,
+      });
+      continue;
+    }
+
+    if (log.message.endsWith("stage completed")) {
+      cards.push({
+        session_id: log.session_id,
+        stage_id: log.stage_id ?? snapshot.session.session_id,
+        stage_name: stageName,
+        kind: "stage_completed",
+        message: `${stageLabel} stage completed`,
+        created_at: log.created_at,
+        payload: log.payload,
+      });
+      continue;
+    }
+
+    if (log.message.endsWith("gate closed")) {
+      cards.push({
+        session_id: log.session_id,
+        stage_id: log.stage_id ?? snapshot.session.session_id,
+        stage_name: stageName,
+        kind: "gate_closed",
+        message: log.message.replace(/^Report /, ""),
+        created_at: log.created_at,
+        payload: log.payload,
+      });
+    }
+  }
+
+  if (
+    snapshot.session.status === "failed" &&
+    snapshot.session.last_error &&
+    !cards.some((card) => card.kind === "failure")
+  ) {
+    cards.push({
+      session_id: snapshot.session.session_id,
+      stage_id: snapshot.current_stage ?? snapshot.session.session_id,
+      stage_name: formatReportLabel(snapshot.current_stage ?? "unknown"),
+      kind: "failure",
+      message: snapshot.session.last_error,
+      created_at: snapshot.session.updated_at ?? snapshot.session.created_at,
+      payload: { error: snapshot.session.last_error },
+    });
+  }
+
+  return cards;
+}
+
+function buildReportSnapshotFromInspection(
+  snapshot: ReportSessionInspectionResponse,
+): { reportCards: ReportCardPayload[]; currentGate: ReportGatePayload | null } {
+  return {
+    reportCards: buildReportCardsFromInspection(snapshot),
+    currentGate: snapshot.gates.find((gate) => gate.status === "open") ?? null,
+  };
+}
+
 function findEdgeIdsBetween(edges: GraphEdge[], nodeIds: string[]): string[] {
   const set = new Set(nodeIds);
   return edges
@@ -184,6 +334,92 @@ export const useChatStore = create<State & Actions>((set, get) => ({
       window.localStorage.removeItem(THREAD_STORAGE_KEY);
     }
     set({ messages: [], threadId: null });
+  },
+
+  launchReport: async () => {
+    const storedReportId = get().activeReportId ?? readStoredReportId();
+    const launch = await createOrResumeReportSession(
+      storedReportId ? { session_id: storedReportId } : {},
+    );
+
+    persistReportId(launch.session_id);
+    const isNewSession = storedReportId !== launch.session_id;
+    set({
+      activeReportId: launch.session_id,
+      reportStatus: launch.status,
+      reportError: null,
+      ...(isNewSession ? { reportCards: [], currentGate: null } : {}),
+    });
+
+    void streamReportSession(launch.session_id, {
+      onReportCard: (card) => {
+        set((state) => {
+          const next: Partial<State> = {
+            reportCards: [...state.reportCards, card],
+          };
+          if (card.kind === "gate_closed") {
+            next.currentGate = null;
+            next.reportStatus = "active";
+          } else if (card.kind === "stage_started") {
+            next.reportStatus = "active";
+          } else if (card.kind === "stage_completed") {
+            next.reportStatus = state.currentGate ? "blocked" : "active";
+          } else if (card.kind === "stage_failed" || card.kind === "failure") {
+            next.reportStatus = "failed";
+            next.reportError = card.message;
+          }
+          return next;
+        });
+      },
+      onReportGate: (gate) => {
+        set({ currentGate: gate, reportStatus: "blocked", reportError: null });
+      },
+      onError: (message) => {
+        set({ reportError: message, reportStatus: "failed" });
+      },
+    }).catch((error) => {
+      set({ reportError: normalizeReportError(error), reportStatus: "failed" });
+    });
+
+    return launch;
+  },
+
+  submitReportGateAnswer: async (answer) => {
+    const activeReportId = get().activeReportId ?? readStoredReportId();
+    const gate = get().currentGate;
+    if (!activeReportId || !gate) {
+      set({ reportError: "No active report gate to answer" });
+      return;
+    }
+
+    set({ currentGate: null, reportError: null });
+    try {
+      await answerReportGate(activeReportId, gate.gate_id, answer);
+    } catch (error) {
+      set({ currentGate: gate, reportError: normalizeReportError(error) });
+      throw error;
+    }
+  },
+
+  hydrateReportFromStorage: async () => {
+    const storedReportId = readStoredReportId();
+    if (!storedReportId) return;
+
+    try {
+      const inspection = await getReportSession(storedReportId);
+      const snapshot = buildReportSnapshotFromInspection(inspection);
+      set({
+        activeReportId: inspection.session.session_id,
+        reportStatus: inspection.session.status,
+        reportCards: snapshot.reportCards,
+        currentGate: snapshot.currentGate,
+        reportError: inspection.session.last_error,
+      });
+      persistReportId(inspection.session.session_id);
+    } catch (error) {
+      set({ reportError: normalizeReportError(error) });
+      throw error;
+    }
   },
 
   appendUserMessage: (content) => {
