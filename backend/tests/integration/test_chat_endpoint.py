@@ -86,35 +86,30 @@ class TestChatStream:
         client, cm, _ = await make_client([AIMessage(content="hello")])
         try:
             with client:
-                with client.stream(
-                    "POST", "/api/chat", json={"message": "hi"}
-                ) as r:
+                with client.stream("POST", "/api/chat", json={"message": "hi"}) as r:
                     assert r.status_code == 200
                     body = "".join(r.iter_text())
             # SSE frames are "event: <name>\ndata: <json>\n\n"
             assert "event: thread" in body
             assert "thread_id" in body
-            assert "\"type\":\"done\"" in body
+            assert '"type":"done"' in body
         finally:
             await cm.__aexit__(None, None, None)
 
-    async def test_stream_includes_done_chunk_even_on_error(
-        self, make_client
-    ) -> None:
+    async def test_stream_includes_done_chunk_even_on_error(self, make_client) -> None:
         client, cm, _ = await make_client([AIMessage(content="ok")])
         try:
             with client:
+
                 async def boom(*args, **kwargs):
                     raise RuntimeError("nope")
                     yield  # pragma: no cover
 
                 client.app.state.app_state.graph.astream_events = boom  # type: ignore[assignment]
-                with client.stream(
-                    "POST", "/api/chat", json={"message": "hi"}
-                ) as r:
+                with client.stream("POST", "/api/chat", json={"message": "hi"}) as r:
                     body = "".join(r.iter_text())
-            assert "\"type\":\"error\"" in body
-            assert "\"type\":\"done\"" in body
+            assert '"type":"error"' in body
+            assert '"type":"done"' in body
         finally:
             await cm.__aexit__(None, None, None)
 

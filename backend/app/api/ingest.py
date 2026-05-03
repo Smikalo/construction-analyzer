@@ -76,14 +76,10 @@ async def ingest(
             should_process = True
         if should_process:
             processing_document_ids.add(record.document_id)
-        if should_process and (
-            not is_duplicate or not os.path.exists(record.stored_path)
-        ):
+        if should_process and (not is_duplicate or not os.path.exists(record.stored_path)):
             with open(record.stored_path, "wb") as out:
                 out.write(upload.body)
-        entries.append(
-            RegisteredIngestFile(record=record, is_duplicate=not should_process)
-        )
+        entries.append(RegisteredIngestFile(record=record, is_duplicate=not should_process))
 
     return await ingest_registered_files(
         state.kb,

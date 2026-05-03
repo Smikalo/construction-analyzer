@@ -51,19 +51,13 @@ async def shared_client_and_state():
 
 
 class TestThreadPersistence:
-    async def test_history_grows_across_two_sync_calls(
-        self, shared_client_and_state
-    ) -> None:
+    async def test_history_grows_across_two_sync_calls(self, shared_client_and_state) -> None:
         client, _ = shared_client_and_state
 
-        r1 = client.post(
-            "/api/chat/sync", json={"message": "hello", "thread_id": "stable"}
-        )
+        r1 = client.post("/api/chat/sync", json={"message": "hello", "thread_id": "stable"})
         assert r1.status_code == 200
 
-        r2 = client.post(
-            "/api/chat/sync", json={"message": "again", "thread_id": "stable"}
-        )
+        r2 = client.post("/api/chat/sync", json={"message": "again", "thread_id": "stable"})
         assert r2.status_code == 200
 
         history = client.get("/api/threads/stable/history").json()
@@ -72,9 +66,7 @@ class TestThreadPersistence:
         assert roles == ["user", "assistant", "user", "assistant"]
         assert contents == ["hello", "first reply", "again", "second reply"]
 
-    async def test_independent_threads_do_not_leak(
-        self, shared_client_and_state
-    ) -> None:
+    async def test_independent_threads_do_not_leak(self, shared_client_and_state) -> None:
         client, _ = shared_client_and_state
 
         client.post("/api/chat/sync", json={"message": "msg-a", "thread_id": "ta"})

@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.schemas import (
     Message,
+    Role,
     ThreadCreated,
     ThreadHistory,
     ThreadInfo,
@@ -35,16 +36,16 @@ async def list_threads(request: Request) -> list[ThreadInfo]:
     async for ckpt in state.checkpointer.alist(config=None):
         cfg = ckpt.config or {}
         tid = cfg.get("configurable", {}).get("thread_id")
-        if not tid:
+        if not isinstance(tid, str) or not tid:
             continue
         msgs = (ckpt.checkpoint.get("channel_values", {}) or {}).get("messages") or []
-        ts = ckpt.checkpoint.get("ts")
+        ts = _ts(ckpt.checkpoint.get("ts"))
         info = seen.get(tid)
-        if info is None or (ts and (info.last_message_at or 0) < _ts(ts)):
+        if info is None or (ts is not None and (info.last_message_at or 0.0) < ts):
             seen[tid] = ThreadInfo(
                 thread_id=tid,
                 message_count=len(msgs),
-                last_message_at=_ts(ts),
+                last_message_at=ts,
             )
 
     return sorted(
@@ -99,11 +100,14 @@ def _ts(value: Any) -> float | None:
         return None
 
 
-def _role_for(message: Any) -> str | None:
+def _role_for(message: Any) -> Role | None:
     t = getattr(message, "type", None)
-    return {
+    if not isinstance(t, str):
+        return None
+    roles: dict[str, Role] = {
         "human": "user",
         "ai": "assistant",
         "system": "system",
         "tool": "tool",
-    }.get(t)
+    }
+    return roles.get(t)

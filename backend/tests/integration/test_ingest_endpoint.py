@@ -663,8 +663,7 @@ class TestIngestEndpoint:
         assert analysis_client.calls == parsed_elements[1:]
 
         assert records[0]["content"] == (
-            "[source=visuals.pdf; page=1; element=paragraph; extraction=pdf_text]\n"
-            "cover page body"
+            "[source=visuals.pdf; page=1; element=paragraph; extraction=pdf_text]\ncover page body"
         )
         assert records[0]["metadata"] == {
             "document_id": registry_record.document_id,
@@ -1237,11 +1236,7 @@ class TestIngestEndpoint:
             "[source=tables.pdf; page=5; element=table; extraction=pdf_table; "
             f"confidence=0.78; warnings=merged_cells,{RAGGED_TABLE_WARNING}]\n"
         )
-        assert content.endswith(
-            "| Room | Area | Notes |\n"
-            "| --- | --- | --- |\n"
-            "| A101 | 42 m2 |  |"
-        )
+        assert content.endswith("| Room | Area | Notes |\n| --- | --- | --- |\n| A101 | 42 m2 |  |")
         metadata = records[0]["metadata"]
         assert metadata["document_id"] == registry_record.document_id
         assert metadata["source"] == "tables.pdf"

@@ -89,7 +89,7 @@ async def _postgres_ok(database_url: str) -> bool:
     endpoint encodes this in the response rather than raising.
     """
     try:
-        import asyncpg
+        import asyncpg  # type: ignore[import-untyped]
 
         # asyncpg doesn't accept the SQLAlchemy-style "postgresql://" prefix in
         # all versions, normalise to its native form.

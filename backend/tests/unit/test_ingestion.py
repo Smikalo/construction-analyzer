@@ -647,7 +647,6 @@ class TestIngestRegisteredFiles:
             }
 
     async def test_registered_ocr_element_is_remembered_with_provenance(
-
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -817,7 +816,6 @@ class TestIngestRegisteredFiles:
             assert kb.dump() == []
 
     async def test_registered_kb_remember_error_marks_failed_and_continues(
-
         self,
         tmp_path: Path,
     ) -> None:

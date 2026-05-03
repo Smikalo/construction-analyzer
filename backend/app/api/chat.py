@@ -61,17 +61,13 @@ async def chat_stream(req: ChatRequest, request: Request):
                     name = event.get("name", "tool")
                     yield {
                         "event": "message",
-                        "data": ChatChunk(
-                            type="tool_call", data=name
-                        ).model_dump_json(),
+                        "data": ChatChunk(type="tool_call", data=name).model_dump_json(),
                     }
                 elif kind == "on_tool_end":
                     name = event.get("name", "tool")
                     yield {
                         "event": "message",
-                        "data": ChatChunk(
-                            type="tool_result", data=name
-                        ).model_dump_json(),
+                        "data": ChatChunk(type="tool_result", data=name).model_dump_json(),
                     }
         except Exception as exc:  # noqa: BLE001
             yield {

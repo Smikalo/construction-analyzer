@@ -153,11 +153,7 @@ def test_visual_summary_ignores_blank_items_after_whitespace_normalization() -> 
     )
 
     assert element is not None
-    assert element.content == (
-        "Axis labels\n"
-        "Labels: North; South\n"
-        "Relationships: North -> South"
-    )
+    assert element.content == ("Axis labels\nLabels: North; South\nRelationships: North -> South")
     assert element.metadata == {
         "visual_summary_chars": len("Axis labels"),
         "labels": ["North", "South"],

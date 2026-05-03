@@ -52,9 +52,7 @@ def format_element_for_memory(
         "warnings": list(element.warnings),
     }
     metadata = {
-        key: value
-        for key, value in standard_metadata.items()
-        if key == "page" or value is not None
+        key: value for key, value in standard_metadata.items() if key == "page" or value is not None
     }
     metadata.update(element.metadata)
     return content, metadata
