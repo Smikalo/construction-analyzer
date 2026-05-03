@@ -19,6 +19,7 @@ from dataclasses import dataclass, replace
 from app.kb.base import KnowledgeBase
 from app.schemas import IngestResponse
 from app.services import element_memory, parsers
+from app.services.converted_drawing_elements import extract_converted_drawing
 from app.services.document_analysis import DocumentAnalyzer
 from app.services.document_elements import DocumentElement
 from app.services.document_registry import DocumentRecord, DocumentRegistry
@@ -95,6 +96,44 @@ def _conversion_registry_outcome(conversion: ConversionResult) -> tuple[str, str
     if conversion.status in {"missing_configuration", "unsupported_extension"}:
         return "skipped", conversion.status
     return "failed", conversion.error or conversion.status
+
+
+async def _ingest_converted_drawing_path(
+    kb: KnowledgeBase,
+    path: str,
+    *,
+    source: str,
+    source_path: str | None,
+    document_id: str | None = None,
+    conversion: ConversionResult,
+    chunk_size: int,
+    chunk_overlap: int,
+    document_analyzer: DocumentAnalyzer | None = None,
+) -> tuple[int, list[str]]:
+    elements = extract_converted_drawing(
+        path,
+        source=source,
+        document_id=document_id,
+        source_path=source_path,
+        conversion=conversion,
+    )
+    enriched_elements = _enrich_document_elements(
+        elements,
+        document_analyzer=document_analyzer,
+    )
+    memory_ids: list[str] = []
+    for element in enriched_elements:
+        for content, metadata in element_memory.chunk_and_format(
+            element,
+            size=chunk_size,
+            overlap=chunk_overlap,
+        ):
+            mid = await kb.remember(content, metadata=metadata)
+            memory_ids.append(mid)
+
+    if not memory_ids:
+        return 0, []
+    return 1, memory_ids
 
 
 async def ingest_files(
@@ -187,11 +226,13 @@ async def ingest_registered_files(
                 continue
 
             try:
-                file_delta, file_memory_ids = await _ingest_path(
+                file_delta, file_memory_ids = await _ingest_converted_drawing_path(
                     kb,
                     conversion.output_path,
                     source=record.original_filename,
+                    source_path=record.stored_path,
                     document_id=record.document_id,
+                    conversion=conversion,
                     chunk_size=chunk_size,
                     chunk_overlap=chunk_overlap,
                     document_analyzer=document_analyzer,

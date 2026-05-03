@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from openpyxl import Workbook
 
+import app.services.converted_drawing_elements as converted_drawing_elements
 from app.kb.fake import FakeKB
 from app.services import ingestion as ingestion_module
 from app.services.document_analysis import OPENAI_ENRICHMENT_FAILED_WARNING
@@ -963,6 +964,127 @@ class TestIngestRegisteredFiles:
             assert converter.calls == [str(dwg_path)]
             assert len(kb.dump()) == 1
 
+    async def test_registered_converter_extractor_failure_marks_failed_and_continues_batch(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        dwg_path = tmp_path / "north.dwg"
+        dwg_path.write_bytes(b"dwg body")
+        txt_path = tmp_path / "notes.txt"
+        txt_path.write_text("batch text")
+        converted_dir = tmp_path / "converted"
+        converted_path = converted_dir / "north.pdf"
+        kb = FakeKB()
+
+        def convert(source_path: str) -> ConversionResult:
+            assert source_path == str(dwg_path)
+            converted_path.parent.mkdir(parents=True, exist_ok=True)
+            converted_path.write_bytes(b"%PDF-1.7\n")
+            return ConversionResult(
+                success=True,
+                status="success",
+                output_path=str(converted_path),
+                warnings=("converter_note",),
+                error=None,
+                diagnostics={"fake": True, "source_path": source_path},
+                command_exit_code=0,
+                timeout_seconds=30,
+                source_extension=".dwg",
+            )
+
+        def fake_extract_converted_drawing(
+            path: str,
+            *,
+            source: str,
+            document_id: str | None = None,
+            source_path: str | None = None,
+            conversion: ConversionResult | None = None,
+        ) -> list[DocumentElement]:
+            assert path == str(converted_path)
+            assert source == "north.dwg"
+            assert document_id is not None
+            assert source_path == str(dwg_path)
+            assert conversion is not None
+            assert conversion.success is True
+            assert conversion.status == "success"
+            assert conversion.output_path == str(converted_path)
+            raise RuntimeError("drawing extraction failed")
+
+        converter = RecordingEngineeringConverter(convert)
+        monkeypatch.setattr(
+            ingestion_module, "extract_converted_drawing", fake_extract_converted_drawing
+        )
+
+        def fake_parse_document(
+            parser_path: str,
+            *,
+            source: str,
+            document_id: str | None = None,
+        ) -> list[DocumentElement]:
+            assert document_id is not None
+            if parser_path == str(txt_path):
+                assert source == "notes.txt"
+                return [
+                    DocumentElement(
+                        document_id=document_id,
+                        source=source,
+                        path=parser_path,
+                        page=1,
+                        element_type="paragraph",
+                        extraction_mode="text",
+                        content="parsed batch text",
+                    )
+                ]
+            raise AssertionError(f"unexpected parse target: {parser_path}")
+
+        monkeypatch.setattr(ingestion_module.parsers, "parse_document", fake_parse_document)
+
+        async with lifespan_document_registry(":memory:") as registry:
+            dwg_record, _ = registry.register_or_get(
+                "hash-converted-extractor-failure",
+                original_filename="north.dwg",
+                stored_path=str(dwg_path),
+                content_type="application/acad",
+                byte_size=dwg_path.stat().st_size,
+            )
+            txt_record, _ = registry.register_or_get(
+                "hash-batch-text",
+                original_filename="notes.txt",
+                stored_path=str(txt_path),
+                content_type="text/plain",
+                byte_size=txt_path.stat().st_size,
+            )
+
+            result = await ingest_registered_files(
+                kb,
+                registry,
+                [
+                    RegisteredIngestFile(record=dwg_record, is_duplicate=False),
+                    RegisteredIngestFile(record=txt_record, is_duplicate=False),
+                ],
+                engineering_converter=converter,
+                engineering_converter_output_dir=str(converted_dir),
+            )
+
+            updated_dwg = registry.get_by_id(dwg_record.document_id)
+            assert updated_dwg is not None
+            assert updated_dwg.status == "failed"
+            assert updated_dwg.error == "drawing extraction failed"
+            assert updated_dwg.memory_ids == []
+
+            updated_txt = registry.get_by_id(txt_record.document_id)
+            assert updated_txt is not None
+            assert updated_txt.status == "indexed"
+            assert updated_txt.error is None
+            assert len(updated_txt.memory_ids) == 1
+
+            assert result.ingested_files == 1
+            assert result.ingested_chunks == 1
+            assert len(result.memory_ids) == 1
+            assert converter.calls == [str(dwg_path)]
+            assert len(kb.dump()) == 1
+
 
 class TestIngestDirectory:
     async def test_ingests_text_extensions_through_classifier(
@@ -1266,20 +1388,50 @@ class TestIngestDirectory:
         def convert(source_path: str) -> ConversionResult:
             assert source_path == str(nested_dir / "north.dwg")
             converted_path.parent.mkdir(parents=True, exist_ok=True)
-            converted_path.write_text("converted north drawing", encoding="utf-8")
+            converted_path.write_bytes(b"%PDF-1.7\n")
             return ConversionResult(
                 success=True,
                 status="success",
                 output_path=str(converted_path),
-                warnings=(),
+                warnings=("converter_note",),
                 error=None,
-                diagnostics={"fake": True, "source_path": source_path},
+                diagnostics={
+                    "fake": True,
+                    "source_path": source_path,
+                    "layers": ["A-WALL"],
+                    "views": ["Level 1"],
+                    "entities": ["Door 7"],
+                    "stdout": "converter stdout should stay hidden",
+                },
                 command_exit_code=0,
                 timeout_seconds=30,
                 source_extension=".dwg",
             )
 
         converter = RecordingEngineeringConverter(convert)
+
+        class FakePage:
+            def __init__(self, text: str | None) -> None:
+                self._text = text
+
+            def extract_text(self) -> str | None:
+                return self._text
+
+        class FakePdfReader:
+            def __init__(self, reader_path: str) -> None:
+                assert reader_path == str(converted_path)
+                self.pages = [
+                    FakePage("Label: North entry\nDimension: 12'-0\""),
+                    FakePage(
+                        "Layer: A-WALL\n"
+                        "View: Level 1\n"
+                        "Entity: Door 7\n"
+                        "Revision: R3\n"
+                        "Note: verify field"
+                    ),
+                ]
+
+        monkeypatch.setattr(converted_drawing_elements, "PdfReader", FakePdfReader)
 
         def fake_parse_document(
             parser_path: str,
@@ -1321,36 +1473,31 @@ class TestIngestDirectory:
                     )
                 ]
             if parser_path == str(converted_path):
-                assert source == "north.dwg"
-                return [
-                    DocumentElement(
-                        document_id=document_id,
-                        source=source,
-                        path=parser_path,
-                        page=1,
-                        element_type="paragraph",
-                        extraction_mode="pdf_text",
-                        content="parsed converted north",
-                    )
-                ]
+                raise AssertionError("parse_document should not run for converted drawings")
             raise AssertionError(f"unexpected parse target: {parser_path}")
 
         monkeypatch.setattr(ingestion_module.parsers, "parse_document", fake_parse_document)
 
+        analyzer = VisualOnlyAnalyzer(lambda element: element)
         kb = FakeKB()
         async with lifespan_document_registry(":memory:") as registry:
             result = await ingest_directory(
                 kb,
                 registry,
                 str(tmp_path),
+                document_analyzer=analyzer,
                 engineering_converter=converter,
                 engineering_converter_output_dir=str(converted_dir),
             )
 
             assert result.ingested_files == 4
-            assert result.ingested_chunks == 6
-            assert len(kb.dump()) == 6
+            assert result.ingested_chunks == len(result.memory_ids)
+            assert len(kb.dump()) == len(result.memory_ids)
             assert converter.calls == [str(nested_dir / "north.dwg")]
+            assert len(analyzer.calls) == 1
+            assert len(analyzer.calls[0]) == 1
+            assert analyzer.calls[0][0].element_type == "drawing"
+            assert analyzer.calls[0][0].extraction_mode == "converted_drawing_text_summary"
 
             top_record = registry.get_by_hash(hashlib.sha256(top_body).hexdigest())
             assert top_record is not None
@@ -1380,7 +1527,7 @@ class TestIngestDirectory:
             assert dwg_record.error is None
             assert dwg_record.original_filename == "north.dwg"
             assert Path(dwg_record.stored_path).parent == nested_dir
-            assert len(dwg_record.memory_ids) == 1
+            assert len(dwg_record.memory_ids) == 8
 
             archive_record = registry.get_by_hash(hashlib.sha256(archive_body).hexdigest())
             assert archive_record is not None
@@ -1400,14 +1547,83 @@ class TestIngestDirectory:
             assert hidden_record is None
 
             memories = kb.dump()
-            dwg_memory = next(
+            dwg_memories = [
                 record for record in memories if record["metadata"]["source"] == "north.dwg"
+            ]
+            assert len(dwg_memories) == 8
+
+            dwg_summary = next(
+                record
+                for record in dwg_memories
+                if record["metadata"]["extraction_mode"] == "converted_drawing_text_summary"
             )
-            assert dwg_memory["content"].startswith(
-                "[source=north.dwg; page=1; element=paragraph; extraction=pdf_text]"
+            assert dwg_summary["content"].startswith(
+                "[source=north.dwg; element=drawing; extraction=converted_drawing_text_summary; "
+                "confidence=1.0; warnings=converter_note]"
             )
-            assert dwg_memory["content"].endswith("parsed converted north")
-            assert dwg_memory["metadata"]["path"] == str(converted_path)
+            assert "Source CAD path: " + str(nested_dir / "north.dwg") in dwg_summary["content"]
+            assert f"Derived artifact path: {converted_path}" in dwg_summary["content"]
+            assert "Conversion status: success" in dwg_summary["content"]
+            assert "Conversion source extension: .dwg" in dwg_summary["content"]
+            assert "Artifact extension: .pdf" in dwg_summary["content"]
+            assert "Text layer mode: exact" in dwg_summary["content"]
+            assert "Exact facts: 7" in dwg_summary["content"]
+            assert (
+                "Fact kinds: label, dimension, layer, entity_view, revision_marker, visible_note"
+                in dwg_summary["content"]
+            )
+            assert "Conversion warnings: converter_note" in dwg_summary["content"]
+            assert "Layers: A-WALL" in dwg_summary["content"]
+            assert "Views: Level 1" in dwg_summary["content"]
+            assert "Entities: Door 7" in dwg_summary["content"]
+            assert dwg_summary["metadata"]["source_cad_file"] == "north.dwg"
+            assert dwg_summary["metadata"]["source_cad_path"] == str(nested_dir / "north.dwg")
+            assert dwg_summary["metadata"]["derived_artifact_path"] == str(converted_path)
+            assert dwg_summary["metadata"]["conversion_status"] == "success"
+            assert dwg_summary["metadata"]["conversion_warnings"] == ["converter_note"]
+            assert dwg_summary["metadata"]["drawing_fact_count"] == 7
+            assert dwg_summary["metadata"]["drawing_fact_types"] == [
+                "label",
+                "dimension",
+                "layer",
+                "entity_view",
+                "revision_marker",
+                "visible_note",
+            ]
+            assert dwg_summary["metadata"]["drawing_layers"] == ["A-WALL"]
+            assert dwg_summary["metadata"]["drawing_views"] == ["Level 1"]
+            assert dwg_summary["metadata"]["drawing_entities"] == ["Door 7"]
+            assert "stdout" not in dwg_summary["metadata"]["conversion_diagnostics"]
+
+            dwg_fact_records = [
+                record
+                for record in dwg_memories
+                if record["metadata"]["extraction_mode"] == "converted_drawing_text_fact"
+            ]
+            assert len(dwg_fact_records) == 7
+            assert [record["metadata"]["drawing_fact_type"] for record in dwg_fact_records] == [
+                "label",
+                "dimension",
+                "layer",
+                "entity_view",
+                "entity_view",
+                "revision_marker",
+                "visible_note",
+            ]
+            assert [
+                record["metadata"]["drawing_fact_subtype"] for record in dwg_fact_records[3:5]
+            ] == [
+                "view",
+                "entity",
+            ]
+            assert all(
+                record["metadata"]["source_cad_path"] == str(nested_dir / "north.dwg")
+                for record in dwg_fact_records
+            )
+            assert all(
+                record["metadata"]["derived_artifact_path"] == str(converted_path)
+                for record in dwg_fact_records
+            )
 
     async def test_missing_directory_is_a_noop(self, tmp_path: Path) -> None:
         kb = FakeKB()

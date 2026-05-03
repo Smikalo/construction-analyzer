@@ -13,6 +13,7 @@ from openpyxl import Workbook
 from openpyxl.comments import Comment
 from openpyxl.worksheet.table import Table
 
+import app.services.converted_drawing_elements as converted_drawing_elements
 from app.agent.tools import build_kb_tools
 from app.config import Settings
 from app.kb.fake import FakeKB
@@ -123,9 +124,16 @@ class TestIngestEndpoint:
             success=True,
             status="success",
             output_path=str(converted_path),
-            warnings=(),
+            warnings=("converter_note",),
             error=None,
-            diagnostics={"fake": True, "source_path": source_path},
+            diagnostics={
+                "fake": True,
+                "source_path": source_path,
+                "layers": ["A-WALL"],
+                "views": ["Level 1"],
+                "entities": ["Door 7"],
+                "stdout": "converter stdout should stay hidden",
+            },
             command_exit_code=0,
             timeout_seconds=30,
             source_extension=Path(source_path).suffix.lower(),
@@ -408,26 +416,31 @@ class TestIngestEndpoint:
         client.app.state.app_state.engineering_converter = converter
         client.app.state.app_state.engineering_converter_output_dir = str(converted_dir)
 
-        def fake_parse_document(
-            path: str,
-            *,
-            source: str,
-            document_id: str | None = None,
-        ) -> list[DocumentElement]:
-            assert Path(path) == converted_path
-            assert source == "north.dwg"
-            assert document_id is not None
-            return [
-                DocumentElement(
-                    document_id=document_id,
-                    source=source,
-                    path=path,
-                    page=1,
-                    element_type="paragraph",
-                    extraction_mode="pdf_text",
-                    content="converted north drawing",
-                )
-            ]
+        class FakePage:
+            def __init__(self, text: str | None) -> None:
+                self._text = text
+
+            def extract_text(self) -> str | None:
+                return self._text
+
+        class FakePdfReader:
+            def __init__(self, reader_path: str) -> None:
+                assert reader_path == str(converted_path)
+                self.pages = [
+                    FakePage("Label: North entry\nDimension: 12'-0\""),
+                    FakePage(
+                        "Layer: A-WALL\n"
+                        "View: Level 1\n"
+                        "Entity: Door 7\n"
+                        "Revision: R3\n"
+                        "Note: verify field"
+                    ),
+                ]
+
+        monkeypatch.setattr(converted_drawing_elements, "PdfReader", FakePdfReader)
+
+        def fake_parse_document(*_args: object, **_kwargs: object) -> list[DocumentElement]:
+            raise AssertionError("parse_document should not run for converted drawings")
 
         monkeypatch.setattr(ingestion_module.parsers, "parse_document", fake_parse_document)
         body_bytes = b"dwg body"
@@ -440,9 +453,10 @@ class TestIngestEndpoint:
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["ingested_files"] == 1
-        assert body["ingested_chunks"] == 1
+        assert body["ingested_chunks"] == len(body["memory_ids"]) == 8
         records = fake_kb.dump()
-        assert len(records) == 1
+        assert len(records) == 8
+        assert body["memory_ids"] == [record["id"] for record in records]
 
         registry_record = client.app.state.app_state.registry.get_by_hash(
             hashlib.sha256(body_bytes).hexdigest()
@@ -454,13 +468,70 @@ class TestIngestEndpoint:
         assert converter.calls == [registry_record.stored_path]
         assert Path(registry_record.stored_path).exists()
         assert Path(converted_path).exists()
-        assert records[0]["content"].startswith(
-            "[source=north.dwg; page=1; element=paragraph; extraction=pdf_text]"
+
+        summary_record = next(
+            record
+            for record in records
+            if record["metadata"]["extraction_mode"] == "converted_drawing_text_summary"
         )
-        assert records[0]["content"].endswith("converted north drawing")
-        assert records[0]["metadata"]["source"] == "north.dwg"
-        assert records[0]["metadata"]["document_id"] == registry_record.document_id
-        assert records[0]["metadata"]["path"] == str(converted_path)
+        assert summary_record["content"].startswith(
+            "[source=north.dwg; element=drawing; extraction=converted_drawing_text_summary; "
+            "confidence=1.0; warnings=converter_note]"
+        )
+        assert "Text layer mode: exact" in summary_record["content"]
+        assert "Conversion warnings: converter_note" in summary_record["content"]
+        assert summary_record["metadata"]["source_cad_file"] == "north.dwg"
+        assert summary_record["metadata"]["source_cad_path"] == registry_record.stored_path
+        assert summary_record["metadata"]["derived_artifact_path"] == str(converted_path)
+        assert summary_record["metadata"]["conversion_status"] == "success"
+        assert summary_record["metadata"]["conversion_warnings"] == ["converter_note"]
+        assert summary_record["metadata"]["drawing_fact_count"] == 7
+        assert summary_record["metadata"]["drawing_fact_types"] == [
+            "label",
+            "dimension",
+            "layer",
+            "entity_view",
+            "revision_marker",
+            "visible_note",
+        ]
+        assert summary_record["metadata"]["drawing_layers"] == ["A-WALL"]
+        assert summary_record["metadata"]["drawing_views"] == ["Level 1"]
+        assert summary_record["metadata"]["drawing_entities"] == ["Door 7"]
+        assert summary_record["metadata"]["conversion_diagnostics"] == {
+            "fake": True,
+            "source_path": registry_record.stored_path,
+            "layers": ["A-WALL"],
+            "views": ["Level 1"],
+            "entities": ["Door 7"],
+        }
+
+        fact_records = [
+            record
+            for record in records
+            if record["metadata"]["extraction_mode"] == "converted_drawing_text_fact"
+        ]
+        assert len(fact_records) == 7
+        assert [record["metadata"]["drawing_fact_type"] for record in fact_records] == [
+            "label",
+            "dimension",
+            "layer",
+            "entity_view",
+            "entity_view",
+            "revision_marker",
+            "visible_note",
+        ]
+        assert [record["metadata"]["drawing_fact_subtype"] for record in fact_records[3:5]] == [
+            "view",
+            "entity",
+        ]
+        assert all(
+            record["metadata"]["source_cad_path"] == registry_record.stored_path
+            for record in fact_records
+        )
+        assert all(
+            record["metadata"]["derived_artifact_path"] == str(converted_path)
+            for record in fact_records
+        )
 
     def test_uploads_xlsx_emits_summary_sheet_formula_value_comment_and_table_memories(
         self,
