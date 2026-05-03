@@ -33,8 +33,8 @@ from app.services.engineering_files import (
             "report.docx",
             ClassificationResult(
                 role="engineering_document",
-                route="skip",
-                reason="docx_extractor_pending",
+                route="parser",
+                reason=None,
                 extension=".docx",
             ),
         ),

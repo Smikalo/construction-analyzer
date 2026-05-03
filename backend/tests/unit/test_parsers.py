@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import docx
 import pytest
 
 import app.services.parsers as parsers
@@ -79,6 +80,28 @@ def test_parse_pdf_emits_non_empty_pages_with_original_page_numbers(
     assert {element.path for element in elements} == {str(path)}
     assert all(element.confidence is None for element in elements)
     assert all(element.warnings == () for element in elements)
+
+
+def test_parse_document_dispatches_docx_to_extract_docx(tmp_path: Path) -> None:
+    path = tmp_path / "dispatch.docx"
+    document = docx.Document()
+    document.add_heading("Dispatch Heading", level=1)
+    document.add_paragraph("Dispatch paragraph")
+    document.save(path)
+
+    elements = parsers.parse_document(
+        str(path),
+        source="dispatch.docx",
+        document_id="dispatch-1",
+    )
+
+    assert len(elements) >= 3
+    assert {element.document_id for element in elements} == {"dispatch-1"}
+    assert {element.source for element in elements} == {"dispatch.docx"}
+    assert {element.path for element in elements} == {str(path)}
+    assert any(element.extraction_mode == "docx_summary" for element in elements)
+    assert any(element.extraction_mode == "docx_heading" for element in elements)
+    assert any(element.extraction_mode == "docx_paragraph" for element in elements)
 
 
 def test_empty_pdf_returns_no_elements(

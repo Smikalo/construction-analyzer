@@ -78,6 +78,18 @@ def parse_text(
     return _parse_text_file(path, source=source, document_id=document_id, extraction_mode="text")
 
 
+def parse_docx(
+    path: str,
+    *,
+    source: str,
+    document_id: str | None = None,
+) -> list[DocumentElement]:
+    """Parse a DOCX into typed elements via the DOCX extractor."""
+    from app.services.docx_elements import extract_docx
+
+    return extract_docx(path, source=source, document_id=document_id)
+
+
 def parse_document(
     path: str,
     *,
@@ -88,6 +100,8 @@ def parse_document(
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
         return parse_pdf(path, source=source, document_id=document_id)
+    if ext == ".docx":
+        return parse_docx(path, source=source, document_id=document_id)
     if ext in (".md", ".markdown"):
         return parse_markdown(path, source=source, document_id=document_id)
     if ext == ".txt":
@@ -123,6 +137,7 @@ def _parse_text_file(
 __all__ = [
     "DocumentParser",
     "parse_document",
+    "parse_docx",
     "parse_markdown",
     "parse_pdf",
     "parse_text",

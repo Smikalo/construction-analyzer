@@ -6,6 +6,7 @@ import hashlib
 import io
 from pathlib import Path
 
+import docx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -250,13 +251,158 @@ class TestIngestEndpoint:
         )
         assert r.status_code == 400
 
-    def test_rejects_unsupported_extension(self, client: TestClient, tmp_path: Path) -> None:
+    def test_unknown_extension_persists_as_skipped(
+        self,
+        client: TestClient,
+        tmp_path: Path,
+    ) -> None:
         client.app.state.app_state.settings.documents_dir = str(tmp_path)
-        r = client.post(
+        body_bytes = b"hello"
+
+        response = client.post(
             "/api/ingest",
-            files=[("files", ("malware.exe", io.BytesIO(b"hello"), "application/octet-stream"))],
+            files=[
+                (
+                    "files",
+                    ("malware.exe", io.BytesIO(body_bytes), "application/octet-stream"),
+                )
+            ],
         )
-        assert r.status_code == 415
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body == {"ingested_files": 0, "ingested_chunks": 0, "memory_ids": []}
+
+        record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(body_bytes).hexdigest()
+        )
+        assert record is not None
+        assert record.original_filename == "malware.exe"
+        assert record.status == "skipped"
+        assert record.error == "unsupported_extension"
+        assert record.memory_ids == []
+        assert Path(record.stored_path).exists()
+        assert Path(record.stored_path).read_bytes() == body_bytes
+
+    @pytest.mark.parametrize(
+        ("filename", "content_type", "reason", "body_bytes"),
+        [
+            pytest.param(
+                "loads.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "xlsx_extractor_pending",
+                b"xlsx body",
+                id="xlsx",
+            ),
+            pytest.param(
+                "north.dwg",
+                "application/acad",
+                "converter_pending",
+                b"dwg body",
+                id="dwg",
+            ),
+            pytest.param(
+                "site.png",
+                "image/png",
+                "image_extractor_pending",
+                b"png body",
+                id="png",
+            ),
+        ],
+    )
+    def test_engineering_uploads_persist_as_skipped_with_reason(
+        self,
+        client: TestClient,
+        fake_kb: FakeKB,
+        tmp_path: Path,
+        filename: str,
+        content_type: str,
+        reason: str,
+        body_bytes: bytes,
+    ) -> None:
+        client.app.state.app_state.settings.documents_dir = str(tmp_path)
+        before_dump = fake_kb.dump()
+
+        response = client.post(
+            "/api/ingest",
+            files=[("files", (filename, io.BytesIO(body_bytes), content_type))],
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body == {"ingested_files": 0, "ingested_chunks": 0, "memory_ids": []}
+        assert fake_kb.dump() == before_dump
+
+        record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(body_bytes).hexdigest()
+        )
+        assert record is not None
+        assert record.original_filename == filename
+        assert record.status == "skipped"
+        assert record.error == reason
+        assert record.memory_ids == []
+        assert Path(record.stored_path).exists()
+        assert Path(record.stored_path).read_bytes() == body_bytes
+
+    def test_pdf_md_txt_uploads_unaffected_by_classifier(
+        self,
+        client: TestClient,
+        fake_kb: FakeKB,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client.app.state.app_state.settings.documents_dir = str(tmp_path)
+
+        def fake_parse_document(
+            path: str,
+            *,
+            source: str,
+            document_id: str | None = None,
+        ) -> list[DocumentElement]:
+            assert Path(path).exists()
+            assert document_id is not None
+            return [
+                DocumentElement(
+                    document_id=document_id,
+                    source=source,
+                    path=path,
+                    page=1,
+                    element_type="paragraph",
+                    extraction_mode="text",
+                    content=f"parsed {source}",
+                )
+            ]
+
+        monkeypatch.setattr(ingestion_module.parsers, "parse_document", fake_parse_document)
+
+        payloads = [
+            ("files", ("design.pdf", io.BytesIO(b"%PDF-1.7\nclassifier"), "application/pdf")),
+            ("files", ("notes.md", io.BytesIO(b"# notes"), "text/markdown")),
+            ("files", ("readme.txt", io.BytesIO(b"plain text"), "text/plain")),
+        ]
+        response = client.post("/api/ingest", files=payloads)
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ingested_files"] == 3
+        assert body["ingested_chunks"] == 3
+        assert len(body["memory_ids"]) == 3
+        assert len(fake_kb.dump()) == 3
+
+        for filename, body_bytes in (
+            ("design.pdf", b"%PDF-1.7\nclassifier"),
+            ("notes.md", b"# notes"),
+            ("readme.txt", b"plain text"),
+        ):
+            record = client.app.state.app_state.registry.get_by_hash(
+                hashlib.sha256(body_bytes).hexdigest()
+            )
+            assert record is not None
+            assert record.original_filename == filename
+            assert record.status == "indexed"
+            assert record.error is None
+            assert record.memory_ids
+            assert Path(record.stored_path).exists()
 
     def test_accepts_uploads_at_and_under_size_limit(
         self,
@@ -1249,6 +1395,100 @@ class TestIngestEndpoint:
         assert metadata["table_rows"] == 2
         assert metadata["table_columns"] == 3
         assert metadata["table_index"] == 0
+
+    def test_uploads_docx_emits_summary_heading_paragraph_and_table_memories(
+        self,
+        client: TestClient,
+        fake_kb: FakeKB,
+        tmp_path: Path,
+    ) -> None:
+        client.app.state.app_state.settings.documents_dir = str(tmp_path)
+
+        document = docx.Document()
+        document.core_properties.title = "Loads Spec"
+        document.core_properties.author = "Test Engineer"
+        document.add_heading("Loads", level=1)
+        document.add_paragraph("Live load: 5 kN per square meter.")
+        table = document.add_table(rows=2, cols=2)
+        table.cell(0, 0).text = "Spec"
+        table.cell(0, 1).text = "Value"
+        table.cell(1, 0).text = "Height"
+        table.cell(1, 1).text = "10 m"
+
+        buffer = io.BytesIO()
+        document.save(buffer)
+        buffer.seek(0)
+        body_bytes = buffer.getvalue()
+
+        response = client.post(
+            "/api/ingest",
+            files=[
+                (
+                    "files",
+                    (
+                        "loads.docx",
+                        io.BytesIO(body_bytes),
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    ),
+                )
+            ],
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ingested_files"] == 1
+        assert len(body["memory_ids"]) >= 4
+
+        records = fake_kb.dump()
+        assert body["memory_ids"] == [record["id"] for record in records]
+
+        registry_record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(body_bytes).hexdigest()
+        )
+        assert registry_record is not None
+        assert registry_record.status == "indexed"
+        assert registry_record.error is None
+        assert registry_record.memory_ids == body["memory_ids"]
+        assert Path(registry_record.stored_path).exists()
+
+        extraction_modes = {record["metadata"]["extraction_mode"] for record in records}
+        assert {
+            "docx_summary",
+            "docx_heading",
+            "docx_paragraph",
+            "docx_table",
+        } <= extraction_modes
+
+        heading_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "docx_heading"
+        )
+        assert heading_record["metadata"].get("section_heading") is None
+        assert heading_record["content"].startswith("[source=loads.docx;")
+        assert "element=heading; extraction=docx_heading" in heading_record["content"]
+
+        paragraph_record = next(
+            record
+            for record in records
+            if record["metadata"]["extraction_mode"] == "docx_paragraph"
+        )
+        assert paragraph_record["metadata"]["section_heading"] == "Loads"
+        assert paragraph_record["content"].startswith("[source=loads.docx;")
+        assert "element=paragraph; extraction=docx_paragraph" in paragraph_record["content"]
+
+        table_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "docx_table"
+        )
+        assert table_record["metadata"]["table_rows"] == 2
+        assert table_record["metadata"]["table_columns"] == 2
+        assert table_record["metadata"]["section_heading"] == "Loads"
+        assert "| Spec | Value |" in table_record["content"]
+        assert "| Height | 10 m |" in table_record["content"]
+
+        summary_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "docx_summary"
+        )
+        assert summary_record["metadata"]["subject"] == "engineering_narrative"
+        assert summary_record["metadata"]["paragraph_count"] == 2
 
     def test_uploads_pdf_skips_empty_page_elements_and_preserves_page_gap(
         self,

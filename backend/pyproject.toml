@@ -19,6 +19,7 @@ dependencies = [
     "langchain-ollama>=0.2.0",
     # Document loaders
     "pypdf>=5.0.1",
+    "python-docx>=1.1.0",
     "markdown-it-py>=3.0.0",
     # Postgres / pgvector for MemoryPalace integration tests
     # MemoryPalace's SQLAlchemy uses sync `postgresql://` URLs which default

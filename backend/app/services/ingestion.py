@@ -11,6 +11,7 @@ real backend is configured.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -21,9 +22,10 @@ from app.services import element_memory, parsers
 from app.services.document_analysis import DocumentAnalyzer
 from app.services.document_elements import DocumentElement
 from app.services.document_registry import DocumentRecord, DocumentRegistry
+from app.services.engineering_files import SUPPORTED_INGEST_EXTENSIONS, classify
 from app.services.visual_elements import VISUAL_ELEMENT_TYPES
 
-SUPPORTED_EXTENSIONS = (".pdf", ".md", ".markdown", ".txt")
+SUPPORTED_EXTENSIONS = tuple(sorted(SUPPORTED_INGEST_EXTENSIONS))
 DEFAULT_CHUNK_SIZE = 1200
 DEFAULT_CHUNK_OVERLAP = 150
 
@@ -34,11 +36,40 @@ class RegisteredIngestFile:
 
     `is_duplicate` is the result returned by `DocumentRegistry.register_or_get`.
     Duplicate rows are not parsed or remembered again; their persisted memory ids
-    are returned so the API response remains backward-compatible.
+    are returned so the API response remains backward-compatible. `folder_segments`
+    carries recursive path context for folder ingestion so backup/archive-style
+    directories can reuse the shared classifier without duplicating it.
     """
 
     record: DocumentRecord
     is_duplicate: bool
+    folder_segments: tuple[str, ...] = ()
+
+
+def classify_and_route_registered_files(
+    registry: DocumentRegistry,
+    entries: Iterable[RegisteredIngestFile],
+) -> list[RegisteredIngestFile]:
+    """Classify registry-backed uploads and persist classifier skips."""
+    routed_entries: list[RegisteredIngestFile] = []
+    for entry in entries:
+        if entry.is_duplicate:
+            routed_entries.append(entry)
+            continue
+
+        result = classify(
+            entry.record.original_filename,
+            folder_segments=entry.folder_segments,
+        )
+        if result.route == "skip":
+            if result.reason is None:
+                raise RuntimeError("classifier returned skip without a reason")
+            registry.mark_skipped(entry.record.document_id, reason=result.reason)
+            continue
+
+        routed_entries.append(entry)
+
+    return routed_entries
 
 
 async def ingest_files(
@@ -134,6 +165,7 @@ async def ingest_registered_files(
 
 async def ingest_directory(
     kb: KnowledgeBase,
+    registry: DocumentRegistry,
     directory: str,
     *,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
@@ -142,14 +174,44 @@ async def ingest_directory(
 ) -> IngestResponse:
     if not os.path.isdir(directory):
         return IngestResponse(ingested_files=0, ingested_chunks=0)
-    paths = [
-        os.path.join(directory, name)
-        for name in sorted(os.listdir(directory))
-        if name.lower().endswith(SUPPORTED_EXTENSIONS)
-    ]
-    return await ingest_files(
+
+    entries: list[RegisteredIngestFile] = []
+    for root, dirnames, filenames in os.walk(directory):
+        dirnames[:] = [name for name in sorted(dirnames) if not name.startswith(".")]
+        rel_root = os.path.relpath(root, directory)
+        folder_segments: tuple[str, ...] = ()
+        if rel_root != os.curdir:
+            folder_segments = tuple(
+                segment
+                for segment in rel_root.split(os.sep)
+                if segment and segment != os.curdir
+            )
+
+        for filename in sorted(filenames):
+            path = os.path.join(root, filename)
+            with open(path, "rb") as file:
+                body = file.read()
+            content_hash = hashlib.sha256(body).hexdigest()
+            record, is_duplicate = registry.register_or_get(
+                content_hash,
+                original_filename=filename,
+                stored_path=path,
+                content_type="",
+                byte_size=len(body),
+            )
+            entries.append(
+                RegisteredIngestFile(
+                    record=record,
+                    is_duplicate=is_duplicate,
+                    folder_segments=folder_segments,
+                )
+            )
+
+    routed_entries = classify_and_route_registered_files(registry, entries)
+    return await ingest_registered_files(
         kb,
-        paths,
+        registry,
+        routed_entries,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         document_analyzer=document_analyzer,

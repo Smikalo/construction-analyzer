@@ -82,8 +82,8 @@ def classify(filename: str, *, folder_segments: Sequence[str] = ()) -> Classific
     if extension in SUPPORTED_ENGINEERING_DOCUMENT_EXTENSIONS:
         return ClassificationResult(
             role="engineering_document",
-            route="skip",
-            reason="docx_extractor_pending",
+            route="parser",
+            reason=None,
             extension=extension,
         )
     if extension in SUPPORTED_ENGINEERING_WORKBOOK_EXTENSIONS:

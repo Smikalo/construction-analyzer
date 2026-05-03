@@ -19,8 +19,8 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from app.schemas import IngestResponse
 from app.services.ingestion import (
-    SUPPORTED_EXTENSIONS,
     RegisteredIngestFile,
+    classify_and_route_registered_files,
     ingest_registered_files,
 )
 
@@ -81,10 +81,11 @@ async def ingest(
                 out.write(upload.body)
         entries.append(RegisteredIngestFile(record=record, is_duplicate=not should_process))
 
+    routed_entries = classify_and_route_registered_files(state.registry, entries)
     return await ingest_registered_files(
         state.kb,
         state.registry,
-        entries,
+        routed_entries,
         document_analyzer=state.document_analyzer,
     )
 
@@ -97,7 +98,7 @@ async def _prepare_uploads(
     prepared: list[_PreparedUpload] = []
     for upload in files:
         filename = _validated_filename(upload.filename)
-        extension = _validated_extension(filename)
+        extension = os.path.splitext(filename)[1].lower()
         body = await upload.read(max_upload_bytes + 1)
         if len(body) > max_upload_bytes:
             raise HTTPException(status_code=413, detail="uploaded file is too large")
@@ -125,10 +126,3 @@ def _validated_filename(filename: str | None) -> str:
     if not basename:
         raise HTTPException(status_code=400, detail="uploaded file is missing a filename")
     return basename
-
-
-def _validated_extension(filename: str) -> str:
-    extension = os.path.splitext(filename)[1].lower()
-    if extension not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(status_code=415, detail="unsupported file type")
-    return extension

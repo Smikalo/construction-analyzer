@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -851,13 +852,192 @@ class TestIngestRegisteredFiles:
 
 
 class TestIngestDirectory:
-    async def test_ingests_supported_extensions_only(self, tmp_path: Path) -> None:
-        (tmp_path / "a.txt").write_text("hello")
-        (tmp_path / "b.md").write_text("world")
-        (tmp_path / "c.bin").write_bytes(b"\x00\x01\x02")
+    async def test_ingests_text_extensions_through_classifier(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        txt_body = b"hello"
+        md_body = b"world"
+        bin_body = b"\x00\x01\x02"
+        (tmp_path / "a.txt").write_bytes(txt_body)
+        (tmp_path / "b.md").write_bytes(md_body)
+        (tmp_path / "c.bin").write_bytes(bin_body)
         kb = FakeKB()
-        result = await ingest_directory(kb, str(tmp_path))
-        assert result.ingested_files == 2
+
+        async with lifespan_document_registry(":memory:") as registry:
+            result = await ingest_directory(kb, registry, str(tmp_path))
+
+            assert result.ingested_files == 2
+            assert result.ingested_chunks == 2
+            assert len(kb.dump()) == 2
+
+            text_record = registry.get_by_hash(hashlib.sha256(txt_body).hexdigest())
+            assert text_record is not None
+            assert text_record.original_filename == "a.txt"
+            assert text_record.status == "indexed"
+            assert text_record.error is None
+            assert len(text_record.memory_ids) == 1
+
+            md_record = registry.get_by_hash(hashlib.sha256(md_body).hexdigest())
+            assert md_record is not None
+            assert md_record.original_filename == "b.md"
+            assert md_record.status == "indexed"
+            assert md_record.error is None
+            assert len(md_record.memory_ids) == 1
+
+            bin_record = registry.get_by_hash(hashlib.sha256(bin_body).hexdigest())
+            assert bin_record is not None
+            assert bin_record.original_filename == "c.bin"
+            assert bin_record.status == "skipped"
+            assert bin_record.error == "unsupported_extension"
+            assert bin_record.memory_ids == []
+
+    async def test_recursive_folder_ingestion_classifies_engineering_and_text_files(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        top_body = b"top level text"
+        pdf_body = b"%PDF-1.7\nplan"
+        xlsx_body = b"xlsx body"
+        dwg_body = b"dwg body"
+        archive_body = b"old archived text"
+        bin_body = b"\x00\x01\x02\x03"
+        hidden_body = b"hidden content"
+
+        nested_dir = tmp_path / "nested"
+        nested_dir.mkdir()
+        archive_dir = tmp_path / "archive"
+        archive_dir.mkdir()
+        hidden_dir = tmp_path / ".git"
+        hidden_dir.mkdir()
+
+        (tmp_path / "top.txt").write_bytes(top_body)
+        (nested_dir / "plan.pdf").write_bytes(pdf_body)
+        (nested_dir / "sheet.xlsx").write_bytes(xlsx_body)
+        (nested_dir / "north.dwg").write_bytes(dwg_body)
+        (archive_dir / "old.txt").write_bytes(archive_body)
+        (tmp_path / "mystery.bin").write_bytes(bin_body)
+        (hidden_dir / "ignored.txt").write_bytes(hidden_body)
+
+        def fake_parse_document(
+            parser_path: str,
+            *,
+            source: str,
+            document_id: str | None = None,
+        ) -> list[DocumentElement]:
+            assert document_id is not None
+            if parser_path == str(nested_dir / "plan.pdf"):
+                assert source == "plan.pdf"
+                return [
+                    DocumentElement(
+                        document_id=document_id,
+                        source=source,
+                        path=parser_path,
+                        page=1,
+                        element_type="paragraph",
+                        extraction_mode="pdf_text",
+                        content="parsed plan",
+                    )
+                ]
+            if parser_path == str(tmp_path / "top.txt"):
+                assert source == "top.txt"
+                return [
+                    DocumentElement(
+                        document_id=document_id,
+                        source=source,
+                        path=parser_path,
+                        element_type="paragraph",
+                        extraction_mode="text",
+                        content="parsed top",
+                    )
+                ]
+            raise AssertionError(f"unexpected parse target: {parser_path}")
+
+        monkeypatch.setattr(ingestion_module.parsers, "parse_document", fake_parse_document)
+
+        kb = FakeKB()
+        async with lifespan_document_registry(":memory:") as registry:
+            result = await ingest_directory(kb, registry, str(tmp_path))
+
+            assert result.ingested_files == 2
+            assert result.ingested_chunks >= 2
+            assert len(kb.dump()) == 2
+
+            top_record = registry.get_by_hash(hashlib.sha256(top_body).hexdigest())
+            assert top_record is not None
+            assert top_record.status == "indexed"
+            assert top_record.error is None
+            assert top_record.original_filename == "top.txt"
+            assert Path(top_record.stored_path).parent == tmp_path
+
+            pdf_record = registry.get_by_hash(hashlib.sha256(pdf_body).hexdigest())
+            assert pdf_record is not None
+            assert pdf_record.status == "indexed"
+            assert pdf_record.error is None
+            assert pdf_record.original_filename == "plan.pdf"
+            assert Path(pdf_record.stored_path).parent == nested_dir
+
+            xlsx_record = registry.get_by_hash(hashlib.sha256(xlsx_body).hexdigest())
+            assert xlsx_record is not None
+            assert xlsx_record.status == "skipped"
+            assert xlsx_record.error == "xlsx_extractor_pending"
+            assert xlsx_record.original_filename == "sheet.xlsx"
+            assert Path(xlsx_record.stored_path).parent == nested_dir
+
+            dwg_record = registry.get_by_hash(hashlib.sha256(dwg_body).hexdigest())
+            assert dwg_record is not None
+            assert dwg_record.status == "skipped"
+            assert dwg_record.error == "converter_pending"
+            assert dwg_record.original_filename == "north.dwg"
+            assert Path(dwg_record.stored_path).parent == nested_dir
+
+            archive_record = registry.get_by_hash(hashlib.sha256(archive_body).hexdigest())
+            assert archive_record is not None
+            assert archive_record.status == "skipped"
+            assert archive_record.error == "backup_or_temp"
+            assert archive_record.original_filename == "old.txt"
+            assert Path(archive_record.stored_path).parent == archive_dir
+
+            bin_record = registry.get_by_hash(hashlib.sha256(bin_body).hexdigest())
+            assert bin_record is not None
+            assert bin_record.status == "skipped"
+            assert bin_record.error == "unsupported_extension"
+            assert bin_record.original_filename == "mystery.bin"
+            assert Path(bin_record.stored_path).parent == tmp_path
+
+            hidden_record = registry.get_by_hash(hashlib.sha256(hidden_body).hexdigest())
+            assert hidden_record is None
+
+    async def test_repeated_text_content_in_tree_deduplicates_to_one_registry_row_and_memory(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        body = b"duplicate tree content"
+        first_path = tmp_path / "first.txt"
+        nested_dir = tmp_path / "nested"
+        nested_dir.mkdir()
+        second_path = nested_dir / "second.txt"
+        first_path.write_bytes(body)
+        second_path.write_bytes(body)
+        kb = FakeKB()
+
+        async with lifespan_document_registry(":memory:") as registry:
+            result = await ingest_directory(kb, registry, str(tmp_path))
+
+            assert result.ingested_files == 1
+            assert result.ingested_chunks == 1
+            assert len(result.memory_ids) == 2
+            assert result.memory_ids[0] == result.memory_ids[1]
+            assert len(kb.dump()) == 1
+
+            record = registry.get_by_hash(hashlib.sha256(body).hexdigest())
+            assert record is not None
+            assert record.status == "indexed"
+            assert record.error is None
+            assert record.original_filename == "first.txt"
+            assert record.stored_path == str(first_path)
+            assert record.memory_ids == [result.memory_ids[0]]
 
     async def test_ingest_directory_threads_document_analyzer(
         self,
@@ -899,22 +1079,31 @@ class TestIngestDirectory:
 
         monkeypatch.setattr(ingestion_module.parsers, "parse_document", fake_parse_document)
 
-        result = await ingest_directory(
-            kb,
-            str(tmp_path),
-            document_analyzer=analyzer,
-        )
+        async with lifespan_document_registry(":memory:") as registry:
+            result = await ingest_directory(
+                kb,
+                registry,
+                str(tmp_path),
+                document_analyzer=analyzer,
+            )
 
-        assert result.ingested_files == 1
-        assert result.ingested_chunks == 1
-        assert analyzer.calls == [[chart_element]]
+            assert result.ingested_files == 1
+            assert result.ingested_chunks == 1
 
-        memories = kb.dump()
-        assert len(memories) == 1
-        assert memories[0]["metadata"]["analysis_status"] == "enriched"
-        assert memories[0]["metadata"]["analysis_provider"] == "fake-openai"
+            record = registry.get_by_hash(hashlib.sha256(b"%PDF-1.7\n").hexdigest())
+            assert record is not None
+            assert record.status == "indexed"
+            assert record.error is None
+            assert analyzer.calls == [[replace(chart_element, document_id=record.document_id)]]
+
+            memories = kb.dump()
+            assert len(memories) == 1
+            assert memories[0]["metadata"]["analysis_status"] == "enriched"
+            assert memories[0]["metadata"]["analysis_provider"] == "fake-openai"
 
     async def test_missing_directory_is_a_noop(self, tmp_path: Path) -> None:
         kb = FakeKB()
-        result = await ingest_directory(kb, str(tmp_path / "nope"))
-        assert result.ingested_files == 0
+        async with lifespan_document_registry(":memory:") as registry:
+            result = await ingest_directory(kb, registry, str(tmp_path / "nope"))
+            assert result.ingested_files == 0
+            assert result.ingested_chunks == 0
