@@ -279,8 +279,7 @@ def test_converter_rejects_template_missing_input_placeholder(tmp_path: Path) ->
 
     settings = _converter_settings(
         command_template=(
-            f"{shlex.quote(sys.executable)} {shlex.quote(str(script_path))} "
-            "--output {output}"
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(script_path))} --output {{output}}"
         ),
         output_dir=str(tmp_path / "converted"),
     )

@@ -89,9 +89,7 @@ async def ingest(
             )
         )
 
-    engineering_converter = state.engineering_converter or get_engineering_converter(
-        state.settings
-    )
+    engineering_converter = state.engineering_converter or get_engineering_converter(state.settings)
     routed_entries = classify_and_route_registered_files(state.registry, entries)
     return await ingest_registered_files(
         state.kb,

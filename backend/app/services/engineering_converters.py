@@ -600,8 +600,7 @@ def run_engineering_converter_smoke(
             exit_code=0,
             status=conversion.status,
             message=(
-                "Real converter smoke passed: "
-                f"{smoke_input_path.name} -> {conversion.output_path}"
+                f"Real converter smoke passed: {smoke_input_path.name} -> {conversion.output_path}"
             ),
             diagnostics=diagnostics,
             conversion=conversion,
@@ -658,14 +657,12 @@ def format_engineering_converter_smoke_report(result: EngineeringConverterSmokeR
             stdout_excerpt = result.conversion.diagnostics.get("stdout_excerpt")
             if stdout_excerpt:
                 lines.append(
-                    "    stdout_excerpt: "
-                    + _smoke_excerpt_for_report(_coerce_text(stdout_excerpt))
+                    "    stdout_excerpt: " + _smoke_excerpt_for_report(_coerce_text(stdout_excerpt))
                 )
             stderr_excerpt = result.conversion.diagnostics.get("stderr_excerpt")
             if stderr_excerpt:
                 lines.append(
-                    "    stderr_excerpt: "
-                    + _smoke_excerpt_for_report(_coerce_text(stderr_excerpt))
+                    "    stderr_excerpt: " + _smoke_excerpt_for_report(_coerce_text(stderr_excerpt))
                 )
     return "\n".join(lines)
 
