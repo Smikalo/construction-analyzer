@@ -18,6 +18,7 @@ from app.agent.graph import build_graph
 from app.kb.fake import FakeKB
 from app.main import build_app, build_app_state
 from app.services.document_registry import lifespan_document_registry
+from app.services.report_pipeline import ReportPipelineRegistry
 from app.services.report_sessions import lifespan_report_sessions
 from tests._fakes import scripted_chat
 
@@ -36,6 +37,7 @@ async def shared_client_and_state():
     checkpointer = await stack.enter_async_context(lifespan_checkpointer(":memory:"))
     registry = await stack.enter_async_context(lifespan_document_registry(":memory:"))
     report_sessions = await stack.enter_async_context(lifespan_report_sessions(":memory:"))
+    pipeline_registry = ReportPipelineRegistry()
     graph = build_graph(llm=llm, kb=kb, checkpointer=checkpointer)
     state = build_app_state(
         llm=llm,
@@ -43,6 +45,7 @@ async def shared_client_and_state():
         checkpointer=checkpointer,
         registry=registry,
         report_sessions=report_sessions,
+        pipeline_registry=pipeline_registry,
         graph=graph,
     )
     app = build_app(state=state)

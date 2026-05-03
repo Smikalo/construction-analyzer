@@ -20,7 +20,8 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from app.agent.checkpointer import lifespan_checkpointer
 from app.agent.graph import build_graph
 from app.agent.llm import get_llm
-from app.api import chat, health, ingest, threads
+from app.api import chat, health, ingest, reports, threads
+from app.services.report_pipeline import ReportPipelineRegistry
 from app.config import Settings, get_settings
 from app.kb.base import KnowledgeBase
 from app.services.document_analysis import DocumentAnalyzer, build_document_analyzer
@@ -37,6 +38,7 @@ class AppState:
     checkpointer: BaseCheckpointSaver
     registry: DocumentRegistry
     report_sessions: ReportSessionStore
+    pipeline_registry: ReportPipelineRegistry
     graph: Any  # CompiledStateGraph; not exposed in stable types
     document_analyzer: DocumentAnalyzer | None = None
     engineering_converter: EngineeringConverter | None = None
@@ -50,6 +52,7 @@ def build_app_state(
     checkpointer: BaseCheckpointSaver,
     registry: DocumentRegistry,
     report_sessions: ReportSessionStore,
+    pipeline_registry: ReportPipelineRegistry,
     graph: Any,
     settings: Settings | None = None,
     document_analyzer: DocumentAnalyzer | None = None,
@@ -72,6 +75,7 @@ def build_app_state(
         checkpointer=checkpointer,
         registry=registry,
         report_sessions=report_sessions,
+        pipeline_registry=pipeline_registry,
         graph=graph,
         document_analyzer=document_analyzer,
         engineering_converter=active_engineering_converter,
@@ -107,6 +111,7 @@ async def _production_lifespan(app: FastAPI) -> AsyncIterator[None]:
             async with lifespan_report_sessions(
                 settings.report_sessions_db_path
             ) as report_sessions:
+                pipeline_registry = ReportPipelineRegistry()
                 graph = build_graph(llm=llm, kb=kb, checkpointer=checkpointer)
                 engineering_converter = get_engineering_converter(settings)
                 app.state.app_state = build_app_state(
@@ -115,6 +120,7 @@ async def _production_lifespan(app: FastAPI) -> AsyncIterator[None]:
                     checkpointer=checkpointer,
                     registry=registry,
                     report_sessions=report_sessions,
+                    pipeline_registry=pipeline_registry,
                     graph=graph,
                     settings=settings,
                     document_analyzer=document_analyzer,
@@ -159,6 +165,7 @@ def build_app(*, state: AppState | None = None) -> FastAPI:
     app.include_router(chat.router)
     app.include_router(threads.router)
     app.include_router(ingest.router)
+    app.include_router(reports.router)
 
     return app
 

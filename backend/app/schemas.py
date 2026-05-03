@@ -164,6 +164,14 @@ class ReportGateAnswerRequest(BaseModel):
     answer: dict[str, Any]
 
 
+class ReportSessionInspectionResponse(BaseModel):
+    session: ReportSession
+    current_stage: str | None = None
+    stages: list[ReportStage] = Field(default_factory=list)
+    gates: list[ReportGate] = Field(default_factory=list)
+    recent_logs: list[ReportLog] = Field(default_factory=list)
+
+
 class ReportSession(BaseModel):
     session_id: str
     status: ReportSessionStatus = "pending"

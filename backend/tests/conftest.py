@@ -22,6 +22,7 @@ from app.config import reset_settings_for_tests
 from app.kb.fake import FakeKB
 from app.main import build_app, build_app_state
 from app.services.document_registry import lifespan_document_registry
+from app.services.report_pipeline import ReportPipelineRegistry
 from app.services.report_sessions import lifespan_report_sessions
 from tests._fakes import ScriptedChatModel, scripted_chat
 
@@ -59,6 +60,7 @@ async def app_with_fakes(fake_kb: FakeKB, scripted_llm_factory) -> AsyncIterator
     async with lifespan_checkpointer(":memory:") as checkpointer:
         async with lifespan_document_registry(":memory:") as registry:
             async with lifespan_report_sessions(":memory:") as report_sessions:
+                pipeline_registry = ReportPipelineRegistry()
                 graph = build_graph(llm=default_llm, kb=fake_kb, checkpointer=checkpointer)
                 state = build_app_state(
                     llm=default_llm,
@@ -66,6 +68,7 @@ async def app_with_fakes(fake_kb: FakeKB, scripted_llm_factory) -> AsyncIterator
                     checkpointer=checkpointer,
                     registry=registry,
                     report_sessions=report_sessions,
+                    pipeline_registry=pipeline_registry,
                     graph=graph,
                 )
                 app = build_app(state=state)

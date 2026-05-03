@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app.main import build_app_state
 from app.services.document_analysis import NoopDocumentAnalyzer
 from app.services.document_registry import DocumentRegistry
+from app.services.report_pipeline import ReportPipelineRegistry
 from app.services.report_sessions import ReportSessionStore
 
 
@@ -38,6 +39,7 @@ def test_build_app_state_can_include_document_analyzer(client: TestClient) -> No
         report_sessions=client.app.state.app_state.report_sessions,
         graph=client.app.state.app_state.graph,
         settings=client.app.state.app_state.settings,
+        pipeline_registry=client.app.state.app_state.pipeline_registry,
         document_analyzer=analyzer,
     )
 
@@ -51,3 +53,9 @@ def test_build_app_state_exposes_report_sessions_store(client: TestClient) -> No
     assert isinstance(state.report_sessions, ReportSessionStore)
     record = state.report_sessions.create_session(session_id="session-1")
     assert state.report_sessions.get_session("session-1") == record
+
+
+def test_build_app_state_exposes_report_pipeline_registry(client: TestClient) -> None:
+    state = client.app.state.app_state
+
+    assert isinstance(state.pipeline_registry, ReportPipelineRegistry)
