@@ -59,8 +59,10 @@ class MemoryPalaceKB(KnowledgeBase):
         self._install_code_transpiler_stub()
 
         try:
-            from memory_palace import database_v3  # noqa: WPS433
-            from memory_palace.services import memory_service  # noqa: WPS433
+            from memory_palace import database_v3  # type: ignore[import-not-found]  # noqa: WPS433
+            from memory_palace.services import (  # type: ignore[import-not-found]
+                memory_service,  # noqa: WPS433
+            )
 
             self._service = memory_service
             self._database = database_v3
@@ -170,7 +172,7 @@ class MemoryPalaceKB(KnowledgeBase):
 
     async def _postgres_ok(self) -> bool:
         try:
-            import asyncpg
+            import asyncpg  # type: ignore[import-untyped]
 
             url = self._database_url.replace("postgresql+asyncpg://", "postgresql://")
             conn = await asyncpg.connect(dsn=url, timeout=2.0)

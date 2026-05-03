@@ -8,7 +8,7 @@ FRONTEND_URL ?= http://localhost:3000
 
 .PHONY: help up down restart rebuild logs ps \
         pull-models pg-shell pg-index \
-        test test-backend test-frontend smoke e2e \
+        test test-backend test-frontend smoke smoke-cad e2e \
         backend-shell frontend-shell clean clean-data
 
 help:
@@ -29,6 +29,7 @@ help:
 	@echo "  make test-backend   Run backend pytest suite"
 	@echo "  make test-frontend  Run frontend vitest suite"
 	@echo "  make smoke          End-to-end pipeline smoke test (curl-based)"
+	@echo "  make smoke-cad      Real CAD/export converter smoke (fails with Configuration Required until ENGINEERING_CONVERTER_COMMAND_TEMPLATE and ENGINEERING_CONVERTER_SMOKE_INPUT_PATH are set)"
 	@echo "  make e2e            Playwright e2e against the running stack"
 	@echo ""
 	@echo "  make backend-shell  Shell inside the backend container"
@@ -75,6 +76,9 @@ test-frontend:
 
 smoke:
 	@bash scripts/smoke.sh
+
+smoke-cad:
+	uv --directory backend run python ../scripts/smoke_cad_converter.py
 
 e2e:
 	$(COMPOSE) run --rm --no-deps frontend npm run e2e

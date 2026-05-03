@@ -9,6 +9,7 @@ from __future__ import annotations
 from langchain_core.language_models import BaseChatModel
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 
 from app.config import Settings, get_settings
 
@@ -24,7 +25,7 @@ def get_llm(settings: Settings | None = None) -> BaseChatModel:
             )
         return ChatOpenAI(
             model=s.openai_model,
-            api_key=s.openai_api_key,
+            api_key=SecretStr(s.openai_api_key),
             temperature=0.2,
             streaming=True,
         )

@@ -25,6 +25,7 @@ from app.config import Settings, get_settings
 from app.kb.base import KnowledgeBase
 from app.services.document_analysis import DocumentAnalyzer, build_document_analyzer
 from app.services.document_registry import DocumentRegistry, lifespan_document_registry
+from app.services.engineering_converters import EngineeringConverter, get_engineering_converter
 
 
 @dataclass
@@ -36,6 +37,8 @@ class AppState:
     registry: DocumentRegistry
     graph: Any  # CompiledStateGraph; not exposed in stable types
     document_analyzer: DocumentAnalyzer | None = None
+    engineering_converter: EngineeringConverter | None = None
+    engineering_converter_output_dir: str = ""
 
 
 def build_app_state(
@@ -47,15 +50,28 @@ def build_app_state(
     graph: Any,
     settings: Settings | None = None,
     document_analyzer: DocumentAnalyzer | None = None,
+    engineering_converter: EngineeringConverter | None = None,
+    engineering_converter_output_dir: str | None = None,
 ) -> AppState:
+    active_settings = settings or get_settings()
+    active_engineering_converter = engineering_converter or get_engineering_converter(
+        active_settings
+    )
+    active_engineering_converter_output_dir = (
+        engineering_converter_output_dir
+        if engineering_converter_output_dir is not None
+        else active_settings.engineering_converter_output_dir
+    )
     return AppState(
-        settings=settings or get_settings(),
+        settings=active_settings,
         llm=llm,
         kb=kb,
         checkpointer=checkpointer,
         registry=registry,
         graph=graph,
         document_analyzer=document_analyzer,
+        engineering_converter=active_engineering_converter,
+        engineering_converter_output_dir=active_engineering_converter_output_dir,
     )
 
 
@@ -85,6 +101,7 @@ async def _production_lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with lifespan_checkpointer(settings.checkpoint_db_path) as checkpointer:
         async with lifespan_document_registry(settings.registry_db_path) as registry:
             graph = build_graph(llm=llm, kb=kb, checkpointer=checkpointer)
+            engineering_converter = get_engineering_converter(settings)
             app.state.app_state = build_app_state(
                 llm=llm,
                 kb=kb,
@@ -93,6 +110,8 @@ async def _production_lifespan(app: FastAPI) -> AsyncIterator[None]:
                 graph=graph,
                 settings=settings,
                 document_analyzer=document_analyzer,
+                engineering_converter=engineering_converter,
+                engineering_converter_output_dir=settings.engineering_converter_output_dir,
             )
             yield
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from langchain_ollama import ChatOllama
 from pydantic import ValidationError
@@ -17,6 +19,7 @@ from app.services.document_analysis import (
     DocumentAnalysisInvalidResponseError,
     DocumentAnalysisRefusalError,
     NoopDocumentAnalyzer,
+    OpenAIDocumentAnalysisClient,
     VisualEnrichmentOutput,
     build_document_analyzer,
     enrich_document_elements,
@@ -80,6 +83,63 @@ def _text_element() -> DocumentElement:
     )
 
 
+def _converted_drawing_element(
+    *,
+    warnings: tuple[str, ...] = ("converter_note",),
+    metadata: dict[str, object] | None = None,
+    content: str = (
+        "Subject: converted_drawing\n"
+        "Source CAD file: north.dwg\n"
+        "Source CAD path: backend/data/documents/input/north.dwg\n"
+        "Derived artifact path: backend/data/documents/converted/north.pdf\n"
+        "Conversion status: success\n"
+        "Conversion source extension: .dwg\n"
+        "Artifact extension: .pdf\n"
+        "Text layer mode: exact\n"
+        "Pages: 2\n"
+        "Text pages: 2\n"
+        "Exact facts: 4\n"
+        "Fact kinds: label, dimension, layer, revision_marker\n"
+        "Conversion warnings: converter_note\n"
+        "Layers: A-WALL\n"
+        "Views: Level 1\n"
+        "Entities: Door 7"
+    ),
+    confidence: float | None = 1.0,
+    extraction_mode: str = "converted_drawing_text_summary",
+) -> DocumentElement:
+    return DocumentElement(
+        document_id="doc-123",
+        source="north.dwg",
+        path="backend/data/documents/converted/north.pdf",
+        page=None,
+        element_type="drawing",
+        extraction_mode=extraction_mode,
+        content=content,
+        confidence=confidence,
+        warnings=warnings,
+        metadata={
+            "subject": "converted_drawing",
+            "source_cad_file": "north.dwg",
+            "source_cad_path": "backend/data/documents/input/north.dwg",
+            "derived_artifact_path": "backend/data/documents/converted/north.pdf",
+            "conversion_status": "success",
+            "conversion_source_extension": ".dwg",
+            "conversion_warnings": ["converter_note"],
+            "drawing_artifact_extension": ".pdf",
+            "drawing_fact_type": "summary",
+            "drawing_page_count": 2,
+            "drawing_text_page_count": 2,
+            "drawing_fact_count": 4,
+            "drawing_fact_types": ["label", "dimension", "layer", "revision_marker"],
+            "drawing_layers": ["A-WALL"],
+            "drawing_views": ["Level 1"],
+            "drawing_entities": ["Door 7"],
+            **(metadata or {}),
+        },
+    )
+
+
 class TestDocumentAnalysisSettings:
     def test_document_analysis_settings_are_optional_and_independent_from_chat_llm(
         self,
@@ -109,6 +169,220 @@ class TestDocumentAnalysisSettings:
 
         assert result[0] is paragraph
         assert result[1] is chart
+
+
+class TestConvertedDrawingDocumentAnalysis:
+    def test_prompt_calls_out_drawing_facts_and_uncertainty_contract(self) -> None:
+        element = _converted_drawing_element()
+        recorded_calls: list[dict[str, object]] = []
+
+        class RecordingCompletions:
+            def parse(self, **kwargs: object) -> object:
+                recorded_calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                parsed=VisualEnrichmentOutput(summary="North stair sketch refined"),
+                                refusal=None,
+                            )
+                        )
+                    ]
+                )
+
+        class RecordingOpenAIClient:
+            def __init__(self) -> None:
+                self.chat = SimpleNamespace(completions=RecordingCompletions())
+
+        analysis_client = OpenAIDocumentAnalysisClient(
+            Settings(
+                llm_provider="ollama",
+                document_analysis_enabled=True,
+                document_analysis_api_key="",
+                document_analysis_model="gpt-4o-mini",
+            ),
+            client=RecordingOpenAIClient(),
+        )
+
+        result = analysis_client.enrich(element)
+
+        assert result.summary == "North stair sketch refined"
+        assert recorded_calls
+        system_prompt = recorded_calls[0]["messages"][0]["content"]
+        assert "converted CAD/drawing exports" in system_prompt
+        assert (
+            "visible labels, annotations, dimensions, revision markers, "
+            "layers, entities, views, and notes" in system_prompt
+        )
+        assert "do not present visual readings as certified measurements" in system_prompt
+        assert "do not invent missing facts" in system_prompt
+
+    def test_approximate_enrichment_preserves_converted_drawing_provenance_and_warnings(
+        self,
+    ) -> None:
+        element = _converted_drawing_element(
+            warnings=("converter_note",),
+            metadata={"drawing_quality": "rough"},
+            confidence=0.83,
+        )
+        client = RecordingDocumentAnalysisClient(
+            response=VisualEnrichmentOutput(
+                summary="North stair sketch with approximate dimensions",
+                labels=["North stair", "Approx. 12 ft span"],
+                relationships=["North stair -> Access path"],
+                uncertainty="dimensions inferred from screenshot",
+                approximate=True,
+                confidence=0.76,
+            )
+        )
+
+        result = enrich_document_elements(
+            [element],
+            settings=Settings(
+                llm_provider="ollama",
+                document_analysis_enabled=True,
+                document_analysis_api_key="",
+                document_analysis_model="gpt-4o-mini",
+            ),
+            client=client,
+        )[0]
+
+        assert client.calls == [element]
+        assert result.document_id == element.document_id
+        assert result.source == element.source
+        assert result.path == element.path
+        assert result.page == element.page
+        assert result.element_type == element.element_type
+        assert result.extraction_mode == "visual_summary"
+        assert result.content == (
+            "North stair sketch with approximate dimensions\n"
+            "Labels: North stair; Approx. 12 ft span\n"
+            "Relationships: North stair -> Access path\n"
+            "Uncertainty: dimensions inferred from screenshot"
+        )
+        assert result.confidence == 0.76
+        assert result.warnings == ("converter_note", APPROXIMATE_VALUE_WARNING)
+        assert result.metadata == {
+            **element.metadata,
+            "drawing_quality": "rough",
+            "visual_summary_chars": len("North stair sketch with approximate dimensions"),
+            "labels": ["North stair", "Approx. 12 ft span"],
+            "relationships": ["North stair -> Access path"],
+            "uncertainty": "dimensions inferred from screenshot",
+            "approximate": True,
+            "analysis_provider": "openai",
+            "analysis_model": "gpt-4o-mini",
+            "analysis_mode": "visual_only",
+            "analysis_status": "enriched",
+            "analysis_source_element_type": "drawing",
+            "analysis_source_extraction_mode": "converted_drawing_text_summary",
+            "analysis_source_confidence": 0.83,
+        }
+
+    def test_blank_enrichment_preserves_converted_drawing_provenance_and_warning(
+        self,
+    ) -> None:
+        element = _converted_drawing_element()
+        client = RecordingDocumentAnalysisClient(
+            response=VisualEnrichmentOutput(
+                summary="   ",
+                labels=[],
+                relationships=[],
+                uncertainty="  ",
+                approximate=False,
+                confidence=0.24,
+            )
+        )
+
+        result = enrich_document_elements(
+            [element],
+            settings=Settings(
+                llm_provider="ollama",
+                document_analysis_enabled=True,
+                document_analysis_api_key="",
+                document_analysis_model="gpt-4o-mini",
+            ),
+            client=client,
+        )[0]
+
+        assert client.calls == [element]
+        assert result.content == element.content
+        assert result.confidence == element.confidence
+        assert result.warnings == ("converter_note", OPENAI_ENRICHMENT_BLANK_WARNING)
+        assert result.metadata == {
+            **element.metadata,
+            "analysis_provider": "openai",
+            "analysis_model": "gpt-4o-mini",
+            "analysis_mode": "visual_only",
+            "analysis_status": "blank",
+            "analysis_source_element_type": "drawing",
+            "analysis_source_extraction_mode": "converted_drawing_text_summary",
+            "analysis_source_confidence": 1.0,
+        }
+
+    @pytest.mark.parametrize(
+        ("error", "warning", "status"),
+        [
+            pytest.param(
+                DocumentAnalysisRefusalError("policy refusal"),
+                OPENAI_ENRICHMENT_REFUSED_WARNING,
+                "refused",
+                id="refusal",
+            ),
+            pytest.param(
+                DocumentAnalysisInvalidResponseError("malformed response"),
+                OPENAI_ENRICHMENT_INVALID_WARNING,
+                "invalid",
+                id="invalid",
+            ),
+            pytest.param(
+                RuntimeError("boom"),
+                OPENAI_ENRICHMENT_FAILED_WARNING,
+                "failed",
+                id="failed",
+            ),
+        ],
+    )
+    def test_failure_paths_preserve_converted_drawing_provenance(
+        self,
+        error: Exception,
+        warning: str,
+        status: str,
+    ) -> None:
+        element = _converted_drawing_element()
+        client = RecordingDocumentAnalysisClient(exception=error)
+
+        result = enrich_document_elements(
+            [element],
+            settings=Settings(
+                llm_provider="ollama",
+                document_analysis_enabled=True,
+                document_analysis_api_key="",
+                document_analysis_model="gpt-4o-mini",
+            ),
+            client=client,
+        )[0]
+
+        assert client.calls == [element]
+        assert result.document_id == element.document_id
+        assert result.source == element.source
+        assert result.path == element.path
+        assert result.page == element.page
+        assert result.element_type == element.element_type
+        assert result.extraction_mode == element.extraction_mode
+        assert result.content == element.content
+        assert result.confidence == element.confidence
+        assert result.warnings == ("converter_note", warning)
+        assert result.metadata == {
+            **element.metadata,
+            "analysis_provider": "openai",
+            "analysis_model": "gpt-4o-mini",
+            "analysis_mode": "visual_only",
+            "analysis_status": status,
+            "analysis_source_element_type": "drawing",
+            "analysis_source_extraction_mode": "converted_drawing_text_summary",
+            "analysis_source_confidence": 1.0,
+        }
 
 
 class TestVisualEnrichmentOutput:

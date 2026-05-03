@@ -255,22 +255,40 @@ def _build_visual_enrichment_messages(element: DocumentElement) -> list[dict[str
         "content": element.content,
         "metadata": element.metadata,
     }
+    system_content = (
+        "You enrich parser-produced visual document evidence for a construction-analysis "
+        "pipeline. Visual-only mode is enabled, so only refine chart, diagram, drawing, "
+        "and image evidence."
+    )
+    if _is_drawing_enrichment_context(element):
+        system_content += (
+            " For drawings and converted CAD/drawing exports, inspect visible labels, "
+            "annotations, dimensions, revision markers, layers, entities, views, and notes. "
+            "Keep exact text-layer facts separate from any visual interpretation, and do not "
+            "present visual readings as certified measurements or invent missing facts."
+        )
+    system_content += (
+        " Return only fields that fit the strict schema and do not add extra keys. If the "
+        "evidence is sparse, preserve the visual summary and do not invent missing facts."
+    )
     return [
         {
             "role": "system",
-            "content": (
-                "You enrich parser-produced visual document evidence for a construction-analysis "
-                "pipeline. Visual-only mode is enabled, so only refine chart, diagram, drawing, "
-                "and image evidence. Return only fields that fit the strict schema and do not add "
-                "extra keys. If the evidence is sparse, preserve the visual summary rather than "
-                "inventing new facts."
-            ),
+            "content": system_content,
         },
         {
             "role": "user",
             "content": json.dumps(context, ensure_ascii=False, sort_keys=True, default=str),
         },
     ]
+
+
+def _is_drawing_enrichment_context(element: DocumentElement) -> bool:
+    if element.metadata.get("subject") == "converted_drawing":
+        return True
+    return element.element_type == "drawing" or element.extraction_mode.startswith(
+        "converted_drawing_"
+    )
 
 
 def _fallback_visual_element(

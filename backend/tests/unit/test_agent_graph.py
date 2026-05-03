@@ -28,9 +28,7 @@ async def kb() -> FakeKB:
 
 
 class TestBuildGraph:
-    async def test_graph_returns_assistant_response_for_simple_message(
-        self, kb: FakeKB
-    ) -> None:
+    async def test_graph_returns_assistant_response_for_simple_message(self, kb: FakeKB) -> None:
         llm = _scripted_llm([AIMessage(content="hello there!")])
         async with lifespan_checkpointer(":memory:") as saver:
             graph = build_graph(llm=llm, kb=kb, checkpointer=saver)
@@ -80,9 +78,7 @@ class TestBuildGraph:
             cfg = {"configurable": {"thread_id": "t-persist"}}
 
             await graph.ainvoke({"messages": [HumanMessage(content="hi")]}, cfg)
-            await graph.ainvoke(
-                {"messages": [HumanMessage(content="and again")]}, cfg
-            )
+            await graph.ainvoke({"messages": [HumanMessage(content="and again")]}, cfg)
 
             state = await graph.aget_state(cfg)
             roles = [m.type for m in state.values["messages"]]

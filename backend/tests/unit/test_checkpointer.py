@@ -44,9 +44,7 @@ class TestAsyncSqliteSaverPersistence:
             state = await graph.aget_state(cfg)
             assert state.values["n"] == 2
 
-    async def test_state_persists_to_disk_across_open_close_cycles(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_state_persists_to_disk_across_open_close_cycles(self, tmp_path: Path) -> None:
         db_path = str(tmp_path / "ckpt.sqlite")
         cfg = {"configurable": {"thread_id": "t-disk"}}
 

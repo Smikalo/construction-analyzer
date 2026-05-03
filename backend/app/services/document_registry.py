@@ -14,12 +14,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
-DocumentStatus = Literal["uploaded", "processing", "indexed", "failed"]
+DocumentStatus = Literal["uploaded", "processing", "indexed", "failed", "skipped"]
 ALLOWED_DOCUMENT_STATUSES: tuple[DocumentStatus, ...] = (
     "uploaded",
     "processing",
     "indexed",
     "failed",
+    "skipped",
 )
 _ALLOWED_STATUS_SET = set(ALLOWED_DOCUMENT_STATUSES)
 
@@ -151,6 +152,14 @@ class DocumentRegistry:
             if record is None:
                 raise KeyError(document_id)
             return record
+
+    def mark_skipped(self, document_id: str, *, reason: str) -> DocumentRecord:
+        """Record a classifier-driven skip reason for a document."""
+        clean_reason = reason.strip()
+        if not clean_reason:
+            raise ValueError("reason must not be empty")
+        # error carries the SkipReason literal for skipped rows; parser failures keep text.
+        return self.update_status(document_id, "skipped", error=clean_reason)
 
     def get_by_id(self, document_id: str) -> DocumentRecord | None:
         """Return a registry row by stable document id, if present."""

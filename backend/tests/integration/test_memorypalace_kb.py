@@ -64,9 +64,7 @@ def kb():
     return MemoryPalaceKB(
         database_url=os.environ["MEMORY_PALACE_DATABASE_URL"],
         ollama_host=os.environ["OLLAMA_HOST"],
-        embedding_model=os.getenv(
-            "MEMORY_PALACE_EMBEDDING_MODEL", "nomic-embed-text"
-        ),
+        embedding_model=os.getenv("MEMORY_PALACE_EMBEDDING_MODEL", "nomic-embed-text"),
         llm_model=os.getenv("MEMORY_PALACE_LLM_MODEL", "qwen3:1.7b"),
         instance_id="construction-analyzer-test",
         project="construction-analyzer-test",

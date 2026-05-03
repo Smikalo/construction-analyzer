@@ -26,12 +26,8 @@ class TestThreadsList:
         assert r.json() == []
 
     def test_lists_threads_after_chat(self, client: TestClient) -> None:
-        client.post(
-            "/api/chat/sync", json={"message": "hello", "thread_id": "alpha"}
-        )
-        client.post(
-            "/api/chat/sync", json={"message": "world", "thread_id": "beta"}
-        )
+        client.post("/api/chat/sync", json={"message": "hello", "thread_id": "alpha"})
+        client.post("/api/chat/sync", json={"message": "world", "thread_id": "beta"})
 
         r = client.get("/api/threads")
         assert r.status_code == 200

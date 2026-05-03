@@ -6,9 +6,14 @@ import hashlib
 import io
 from pathlib import Path
 
+import docx
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
+from openpyxl.comments import Comment
+from openpyxl.worksheet.table import Table
 
+import app.services.converted_drawing_elements as converted_drawing_elements
 from app.agent.tools import build_kb_tools
 from app.config import Settings
 from app.kb.fake import FakeKB
@@ -19,6 +24,7 @@ from app.services.document_analysis import (
     build_document_analyzer,
 )
 from app.services.document_elements import DocumentElement
+from app.services.engineering_converters import ConversionResult
 from app.services.ocr_elements import ocr_element_from_text
 from app.services.table_elements import RAGGED_TABLE_WARNING, table_element_from_rows
 from app.services.visual_elements import APPROXIMATE_VALUE_WARNING, visual_element_from_summary
@@ -74,7 +80,65 @@ def _build_visual_analyzer(
     return analyzer, analysis_client
 
 
+class RecordingEngineeringConverter:
+    def __init__(self, convert) -> None:
+        self.calls: list[str] = []
+        self._convert = convert
+
+    def convert(self, source_path: str) -> ConversionResult:
+        self.calls.append(source_path)
+        return self._convert(source_path)
+
+    def get_diagnostics(self) -> dict[str, object]:
+        return {"calls": len(self.calls)}
+
+
+def _build_xlsx_workbook_bytes() -> bytes:
+    workbook = Workbook()
+    visible_sheet = workbook.active
+    visible_sheet.title = "Loads"
+    visible_sheet["A1"] = "Region"
+    visible_sheet["B1"] = "Load [kN]"
+    visible_sheet["A2"] = "North [kN]"
+    visible_sheet["B2"] = 12
+    visible_sheet["C2"] = "=SUM(B2:B2)"
+    visible_sheet["C2"].comment = Comment("Needs review", "Planner")
+    visible_sheet.add_table(Table(displayName="LoadTable", ref="A1:B2"))
+
+    hidden_sheet = workbook.create_sheet("Hidden Notes")
+    hidden_sheet["A1"] = "Internal note"
+    hidden_sheet.sheet_state = "hidden"
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 class TestIngestEndpoint:
+    @staticmethod
+    def _make_converted_result(source_path: str, converted_path: Path) -> ConversionResult:
+        converted_path.parent.mkdir(parents=True, exist_ok=True)
+        converted_path.write_text("converted north drawing", encoding="utf-8")
+        return ConversionResult(
+            success=True,
+            status="success",
+            output_path=str(converted_path),
+            warnings=("converter_note",),
+            error=None,
+            diagnostics={
+                "fake": True,
+                "source_path": source_path,
+                "layers": ["A-WALL"],
+                "views": ["Level 1"],
+                "entities": ["Door 7"],
+                "stdout": "converter stdout should stay hidden",
+            },
+            command_exit_code=0,
+            timeout_seconds=30,
+            source_extension=Path(source_path).suffix.lower(),
+        )
+
     def test_uploads_text_file(self, client: TestClient, tmp_path: Path) -> None:
         # Redirect documents_dir into the test tmpdir so we don't write
         # outside the sandbox.
@@ -250,13 +314,429 @@ class TestIngestEndpoint:
         )
         assert r.status_code == 400
 
-    def test_rejects_unsupported_extension(self, client: TestClient, tmp_path: Path) -> None:
+    def test_unknown_extension_persists_as_skipped(
+        self,
+        client: TestClient,
+        tmp_path: Path,
+    ) -> None:
         client.app.state.app_state.settings.documents_dir = str(tmp_path)
-        r = client.post(
+        body_bytes = b"hello"
+
+        response = client.post(
             "/api/ingest",
-            files=[("files", ("malware.exe", io.BytesIO(b"hello"), "application/octet-stream"))],
+            files=[
+                (
+                    "files",
+                    ("malware.exe", io.BytesIO(body_bytes), "application/octet-stream"),
+                )
+            ],
         )
-        assert r.status_code == 415
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body == {"ingested_files": 0, "ingested_chunks": 0, "memory_ids": []}
+
+        record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(body_bytes).hexdigest()
+        )
+        assert record is not None
+        assert record.original_filename == "malware.exe"
+        assert record.status == "skipped"
+        assert record.error == "unsupported_extension"
+        assert record.memory_ids == []
+        assert Path(record.stored_path).exists()
+        assert Path(record.stored_path).read_bytes() == body_bytes
+
+    @pytest.mark.parametrize(
+        ("filename", "content_type", "reason", "body_bytes"),
+        [
+            pytest.param(
+                "north.dwg",
+                "application/acad",
+                "missing_configuration",
+                b"dwg body",
+                id="dwg",
+            ),
+            pytest.param(
+                "site.png",
+                "image/png",
+                "image_extractor_pending",
+                b"png body",
+                id="png",
+            ),
+        ],
+    )
+    def test_engineering_uploads_persist_as_skipped_with_reason(
+        self,
+        client: TestClient,
+        fake_kb: FakeKB,
+        tmp_path: Path,
+        filename: str,
+        content_type: str,
+        reason: str,
+        body_bytes: bytes,
+    ) -> None:
+        client.app.state.app_state.settings.documents_dir = str(tmp_path)
+        before_dump = fake_kb.dump()
+
+        response = client.post(
+            "/api/ingest",
+            files=[("files", (filename, io.BytesIO(body_bytes), content_type))],
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body == {"ingested_files": 0, "ingested_chunks": 0, "memory_ids": []}
+        assert fake_kb.dump() == before_dump
+
+        record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(body_bytes).hexdigest()
+        )
+        assert record is not None
+        assert record.original_filename == filename
+        assert record.status == "skipped"
+        assert record.error == reason
+        assert record.memory_ids == []
+        assert Path(record.stored_path).exists()
+        assert Path(record.stored_path).read_bytes() == body_bytes
+
+    def test_uploads_cad_export_through_converter_seam(
+        self,
+        client: TestClient,
+        fake_kb: FakeKB,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client.app.state.app_state.settings.documents_dir = str(tmp_path)
+        converted_dir = tmp_path / "converted"
+        converted_path = converted_dir / "north.pdf"
+        converter = RecordingEngineeringConverter(
+            lambda source_path: self._make_converted_result(source_path, converted_path)
+        )
+        client.app.state.app_state.engineering_converter = converter
+        client.app.state.app_state.engineering_converter_output_dir = str(converted_dir)
+
+        class FakePage:
+            def __init__(self, text: str | None) -> None:
+                self._text = text
+
+            def extract_text(self) -> str | None:
+                return self._text
+
+        class FakePdfReader:
+            def __init__(self, reader_path: str) -> None:
+                assert reader_path == str(converted_path)
+                self.pages = [
+                    FakePage("Label: North entry\nDimension: 12'-0\""),
+                    FakePage(
+                        "Layer: A-WALL\n"
+                        "View: Level 1\n"
+                        "Entity: Door 7\n"
+                        "Revision: R3\n"
+                        "Note: verify field"
+                    ),
+                ]
+
+        monkeypatch.setattr(converted_drawing_elements, "PdfReader", FakePdfReader)
+
+        def fake_parse_document(*_args: object, **_kwargs: object) -> list[DocumentElement]:
+            raise AssertionError("parse_document should not run for converted drawings")
+
+        monkeypatch.setattr(ingestion_module.parsers, "parse_document", fake_parse_document)
+        body_bytes = b"dwg body"
+
+        response = client.post(
+            "/api/ingest",
+            files=[("files", ("north.dwg", io.BytesIO(body_bytes), "application/acad"))],
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ingested_files"] == 1
+        assert body["ingested_chunks"] == len(body["memory_ids"]) == 8
+        records = fake_kb.dump()
+        assert len(records) == 8
+        assert body["memory_ids"] == [record["id"] for record in records]
+
+        registry_record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(body_bytes).hexdigest()
+        )
+        assert registry_record is not None
+        assert registry_record.status == "indexed"
+        assert registry_record.error is None
+        assert registry_record.memory_ids == body["memory_ids"]
+        assert converter.calls == [registry_record.stored_path]
+        assert Path(registry_record.stored_path).exists()
+        assert Path(converted_path).exists()
+
+        summary_record = next(
+            record
+            for record in records
+            if record["metadata"]["extraction_mode"] == "converted_drawing_text_summary"
+        )
+        assert summary_record["content"].startswith(
+            "[source=north.dwg; layers=A-WALL; views=Level 1; entities=Door 7; "
+            "element=drawing; extraction=converted_drawing_text_summary; confidence=1.0; "
+            "warnings=converter_note]"
+        )
+        assert "Text layer mode: exact" in summary_record["content"]
+        assert "Conversion warnings: converter_note" in summary_record["content"]
+        assert summary_record["metadata"]["source_cad_file"] == "north.dwg"
+        assert summary_record["metadata"]["source_cad_path"] == registry_record.stored_path
+        assert summary_record["metadata"]["derived_artifact_path"] == str(converted_path)
+        assert summary_record["metadata"]["conversion_status"] == "success"
+        assert summary_record["metadata"]["conversion_warnings"] == ["converter_note"]
+        assert summary_record["metadata"]["drawing_fact_count"] == 7
+        assert summary_record["metadata"]["drawing_fact_types"] == [
+            "label",
+            "dimension",
+            "layer",
+            "entity_view",
+            "revision_marker",
+            "visible_note",
+        ]
+        assert summary_record["metadata"]["drawing_layers"] == ["A-WALL"]
+        assert summary_record["metadata"]["drawing_views"] == ["Level 1"]
+        assert summary_record["metadata"]["drawing_entities"] == ["Door 7"]
+        assert summary_record["metadata"]["conversion_diagnostics"] == {
+            "fake": True,
+            "source_path": registry_record.stored_path,
+            "layers": ["A-WALL"],
+            "views": ["Level 1"],
+            "entities": ["Door 7"],
+        }
+
+        fact_records = [
+            record
+            for record in records
+            if record["metadata"]["extraction_mode"] == "converted_drawing_text_fact"
+        ]
+        assert len(fact_records) == 7
+        assert [record["metadata"]["drawing_fact_type"] for record in fact_records] == [
+            "label",
+            "dimension",
+            "layer",
+            "entity_view",
+            "entity_view",
+            "revision_marker",
+            "visible_note",
+        ]
+        assert [record["metadata"]["drawing_fact_subtype"] for record in fact_records[3:5]] == [
+            "view",
+            "entity",
+        ]
+        assert all(
+            record["metadata"]["source_cad_path"] == registry_record.stored_path
+            for record in fact_records
+        )
+        assert all(
+            record["metadata"]["derived_artifact_path"] == str(converted_path)
+            for record in fact_records
+        )
+
+    def test_uploads_xlsx_emits_summary_sheet_formula_value_comment_and_table_memories(
+        self,
+        client: TestClient,
+        fake_kb: FakeKB,
+        tmp_path: Path,
+    ) -> None:
+        client.app.state.app_state.settings.documents_dir = str(tmp_path)
+        body_bytes = _build_xlsx_workbook_bytes()
+
+        response = client.post(
+            "/api/ingest",
+            files=[
+                (
+                    "files",
+                    (
+                        "loads.xlsx",
+                        io.BytesIO(body_bytes),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ),
+                )
+            ],
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ingested_files"] == 1
+        assert body["ingested_chunks"] == len(body["memory_ids"])
+        assert body["memory_ids"]
+
+        records = fake_kb.dump()
+        assert body["memory_ids"] == [record["id"] for record in records]
+        assert len(records) == len(body["memory_ids"])
+
+        registry_record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(body_bytes).hexdigest()
+        )
+        assert registry_record is not None
+        assert registry_record.status == "indexed"
+        assert registry_record.error is None
+        assert registry_record.memory_ids == body["memory_ids"]
+        assert Path(registry_record.stored_path).exists()
+        assert Path(registry_record.stored_path).parent == tmp_path
+
+        assert all(record["metadata"]["source"] == "loads.xlsx" for record in records)
+        assert all(
+            record["metadata"]["document_id"] == registry_record.document_id for record in records
+        )
+        assert all(record["metadata"]["path"] == registry_record.stored_path for record in records)
+        assert all(record["content"].startswith("[source=loads.xlsx;") for record in records)
+
+        modes = [record["metadata"]["extraction_mode"] for record in records]
+        assert {
+            "xlsx_summary",
+            "xlsx_sheet_summary",
+            "xlsx_cell",
+            "xlsx_formula",
+            "xlsx_comment",
+            "xlsx_table",
+        } <= set(modes)
+        assert modes.count("xlsx_sheet_summary") == 2
+
+        summary_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "xlsx_summary"
+        )
+        assert summary_record["metadata"]["sheet_count"] == 2
+        assert summary_record["metadata"]["xlsx_sheets"] == ["Loads", "Hidden Notes"]
+        assert summary_record["metadata"]["xlsx_visible_sheet_count"] == 1
+        assert summary_record["metadata"]["xlsx_hidden_sheet_count"] == 1
+        assert summary_record["content"].startswith(
+            "[source=loads.xlsx; element=file_summary; extraction=xlsx_summary; confidence=1.0]"
+        )
+
+        sheet_summaries = [
+            record
+            for record in records
+            if record["metadata"]["extraction_mode"] == "xlsx_sheet_summary"
+        ]
+        assert len(sheet_summaries) == 2
+        visible_sheet_summary = next(
+            record for record in sheet_summaries if record["metadata"]["xlsx_sheet"] == "Loads"
+        )
+        hidden_sheet_summary = next(
+            record
+            for record in sheet_summaries
+            if record["metadata"]["xlsx_sheet"] == "Hidden Notes"
+        )
+        assert visible_sheet_summary["metadata"]["xlsx_sheet_state"] == "visible"
+        assert visible_sheet_summary["metadata"]["xlsx_range"] == "A1:C2"
+        assert hidden_sheet_summary["metadata"]["xlsx_sheet_state"] == "hidden"
+
+        cell_record = next(
+            record
+            for record in records
+            if record["metadata"]["extraction_mode"] == "xlsx_cell"
+            and record["metadata"]["xlsx_cell"] == "B2"
+        )
+        assert cell_record["content"].startswith(
+            "[source=loads.xlsx; sheet=Loads; cell=B2; label=North [kN]; unit=kN; "
+            "element=cell; extraction=xlsx_cell; certainty=exact; confidence=1.0]"
+        )
+        assert cell_record["metadata"]["xlsx_sheet"] == "Loads"
+        assert cell_record["metadata"]["xlsx_row_label"] == "North [kN]"
+        assert cell_record["metadata"]["xlsx_column_label"] == "Load [kN]"
+        assert cell_record["metadata"]["xlsx_label"] == "North [kN]"
+        assert cell_record["metadata"]["xlsx_unit"] == "kN"
+        assert cell_record["metadata"]["xlsx_value"] == 12
+        assert cell_record["metadata"]["xlsx_value_kind"] == "literal"
+
+        formula_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "xlsx_formula"
+        )
+        assert formula_record["content"].startswith(
+            "[source=loads.xlsx; sheet=Loads; cell=C2; label=12; "
+            "element=formula; extraction=xlsx_formula; "
+            "certainty=exact_formula_cached_value_unknown; confidence=1.0; "
+            "warnings=missing_cached_value]"
+        )
+        assert formula_record["metadata"]["xlsx_formula"] == "=SUM(B2:B2)"
+        assert formula_record["metadata"]["xlsx_value_kind"] == "missing_cached_value"
+        assert formula_record["metadata"]["warnings"] == ["missing_cached_value"]
+
+        comment_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "xlsx_comment"
+        )
+        assert comment_record["content"].startswith(
+            "[source=loads.xlsx; sheet=Loads; cell=C2; "
+            "element=comment; extraction=xlsx_comment; certainty=exact; confidence=1.0]"
+        )
+        assert comment_record["metadata"]["xlsx_comment_author"] == "Planner"
+        assert comment_record["metadata"]["xlsx_comment_text"] == "Needs review"
+
+        table_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "xlsx_table"
+        )
+        assert table_record["content"].startswith(
+            "[source=loads.xlsx; sheet=Loads; range=A1:B2; table=LoadTable; "
+            "element=table; extraction=xlsx_table; confidence=1.0]"
+        )
+        assert table_record["metadata"]["xlsx_sheet"] == "Loads"
+        assert table_record["metadata"]["xlsx_range"] == "A1:B2"
+        assert table_record["metadata"]["xlsx_table_name"] == "LoadTable"
+        assert table_record["metadata"]["table_rows"] == 2
+        assert table_record["metadata"]["table_columns"] == 2
+
+    def test_pdf_md_txt_uploads_unaffected_by_classifier(
+        self,
+        client: TestClient,
+        fake_kb: FakeKB,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client.app.state.app_state.settings.documents_dir = str(tmp_path)
+
+        def fake_parse_document(
+            path: str,
+            *,
+            source: str,
+            document_id: str | None = None,
+        ) -> list[DocumentElement]:
+            assert Path(path).exists()
+            assert document_id is not None
+            return [
+                DocumentElement(
+                    document_id=document_id,
+                    source=source,
+                    path=path,
+                    page=1,
+                    element_type="paragraph",
+                    extraction_mode="text",
+                    content=f"parsed {source}",
+                )
+            ]
+
+        monkeypatch.setattr(ingestion_module.parsers, "parse_document", fake_parse_document)
+
+        payloads = [
+            ("files", ("design.pdf", io.BytesIO(b"%PDF-1.7\nclassifier"), "application/pdf")),
+            ("files", ("notes.md", io.BytesIO(b"# notes"), "text/markdown")),
+            ("files", ("readme.txt", io.BytesIO(b"plain text"), "text/plain")),
+        ]
+        response = client.post("/api/ingest", files=payloads)
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ingested_files"] == 3
+        assert body["ingested_chunks"] == 3
+        assert len(body["memory_ids"]) == 3
+        assert len(fake_kb.dump()) == 3
+
+        for filename, body_bytes in (
+            ("design.pdf", b"%PDF-1.7\nclassifier"),
+            ("notes.md", b"# notes"),
+            ("readme.txt", b"plain text"),
+        ):
+            record = client.app.state.app_state.registry.get_by_hash(
+                hashlib.sha256(body_bytes).hexdigest()
+            )
+            assert record is not None
+            assert record.original_filename == filename
+            assert record.status == "indexed"
+            assert record.error is None
+            assert record.memory_ids
+            assert Path(record.stored_path).exists()
 
     def test_accepts_uploads_at_and_under_size_limit(
         self,
@@ -320,6 +800,59 @@ class TestIngestEndpoint:
         assert record.error == "boom"
         assert record.memory_ids == []
         assert fake_kb.dump() == []
+
+    def test_corrupt_xlsx_upload_marks_registry_failed_and_continues_batch(
+        self,
+        client: TestClient,
+        fake_kb: FakeKB,
+        tmp_path: Path,
+    ) -> None:
+        client.app.state.app_state.settings.documents_dir = str(tmp_path)
+        bad_xlsx_body = b"not a real workbook"
+        valid_body = b"batch text"
+
+        response = client.post(
+            "/api/ingest",
+            files=[
+                (
+                    "files",
+                    (
+                        "bad.xlsx",
+                        io.BytesIO(bad_xlsx_body),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ),
+                ),
+                ("files", ("valid.txt", io.BytesIO(valid_body), "text/plain")),
+            ],
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ingested_files"] == 1
+        assert body["ingested_chunks"] == 1
+        assert len(body["memory_ids"]) == 1
+
+        records = fake_kb.dump()
+        assert len(records) == 1
+        assert body["memory_ids"] == [record["id"] for record in records]
+
+        text_record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(valid_body).hexdigest()
+        )
+        assert text_record is not None
+        assert text_record.status == "indexed"
+        assert text_record.error is None
+        assert text_record.memory_ids == body["memory_ids"]
+        assert Path(text_record.stored_path).exists()
+
+        xlsx_record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(bad_xlsx_body).hexdigest()
+        )
+        assert xlsx_record is not None
+        assert xlsx_record.status == "failed"
+        assert xlsx_record.error
+        assert xlsx_record.memory_ids == []
+        assert Path(xlsx_record.stored_path).exists()
 
     def test_uploads_multi_page_pdf_emits_per_page_memories_with_inline_provenance(
         self,
@@ -663,8 +1196,7 @@ class TestIngestEndpoint:
         assert analysis_client.calls == parsed_elements[1:]
 
         assert records[0]["content"] == (
-            "[source=visuals.pdf; page=1; element=paragraph; extraction=pdf_text]\n"
-            "cover page body"
+            "[source=visuals.pdf; page=1; element=paragraph; extraction=pdf_text]\ncover page body"
         )
         assert records[0]["metadata"] == {
             "document_id": registry_record.document_id,
@@ -1237,11 +1769,7 @@ class TestIngestEndpoint:
             "[source=tables.pdf; page=5; element=table; extraction=pdf_table; "
             f"confidence=0.78; warnings=merged_cells,{RAGGED_TABLE_WARNING}]\n"
         )
-        assert content.endswith(
-            "| Room | Area | Notes |\n"
-            "| --- | --- | --- |\n"
-            "| A101 | 42 m2 |  |"
-        )
+        assert content.endswith("| Room | Area | Notes |\n| --- | --- | --- |\n| A101 | 42 m2 |  |")
         metadata = records[0]["metadata"]
         assert metadata["document_id"] == registry_record.document_id
         assert metadata["source"] == "tables.pdf"
@@ -1254,6 +1782,100 @@ class TestIngestEndpoint:
         assert metadata["table_rows"] == 2
         assert metadata["table_columns"] == 3
         assert metadata["table_index"] == 0
+
+    def test_uploads_docx_emits_summary_heading_paragraph_and_table_memories(
+        self,
+        client: TestClient,
+        fake_kb: FakeKB,
+        tmp_path: Path,
+    ) -> None:
+        client.app.state.app_state.settings.documents_dir = str(tmp_path)
+
+        document = docx.Document()
+        document.core_properties.title = "Loads Spec"
+        document.core_properties.author = "Test Engineer"
+        document.add_heading("Loads", level=1)
+        document.add_paragraph("Live load: 5 kN per square meter.")
+        table = document.add_table(rows=2, cols=2)
+        table.cell(0, 0).text = "Spec"
+        table.cell(0, 1).text = "Value"
+        table.cell(1, 0).text = "Height"
+        table.cell(1, 1).text = "10 m"
+
+        buffer = io.BytesIO()
+        document.save(buffer)
+        buffer.seek(0)
+        body_bytes = buffer.getvalue()
+
+        response = client.post(
+            "/api/ingest",
+            files=[
+                (
+                    "files",
+                    (
+                        "loads.docx",
+                        io.BytesIO(body_bytes),
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    ),
+                )
+            ],
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ingested_files"] == 1
+        assert len(body["memory_ids"]) >= 4
+
+        records = fake_kb.dump()
+        assert body["memory_ids"] == [record["id"] for record in records]
+
+        registry_record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(body_bytes).hexdigest()
+        )
+        assert registry_record is not None
+        assert registry_record.status == "indexed"
+        assert registry_record.error is None
+        assert registry_record.memory_ids == body["memory_ids"]
+        assert Path(registry_record.stored_path).exists()
+
+        extraction_modes = {record["metadata"]["extraction_mode"] for record in records}
+        assert {
+            "docx_summary",
+            "docx_heading",
+            "docx_paragraph",
+            "docx_table",
+        } <= extraction_modes
+
+        heading_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "docx_heading"
+        )
+        assert heading_record["metadata"].get("section_heading") is None
+        assert heading_record["content"].startswith("[source=loads.docx;")
+        assert "element=heading; extraction=docx_heading" in heading_record["content"]
+
+        paragraph_record = next(
+            record
+            for record in records
+            if record["metadata"]["extraction_mode"] == "docx_paragraph"
+        )
+        assert paragraph_record["metadata"]["section_heading"] == "Loads"
+        assert paragraph_record["content"].startswith("[source=loads.docx;")
+        assert "element=paragraph; extraction=docx_paragraph" in paragraph_record["content"]
+
+        table_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "docx_table"
+        )
+        assert table_record["metadata"]["table_rows"] == 2
+        assert table_record["metadata"]["table_columns"] == 2
+        assert table_record["metadata"]["section_heading"] == "Loads"
+        assert "| Spec | Value |" in table_record["content"]
+        assert "| Height | 10 m |" in table_record["content"]
+
+        summary_record = next(
+            record for record in records if record["metadata"]["extraction_mode"] == "docx_summary"
+        )
+        assert summary_record["metadata"]["subject"] == "engineering_narrative"
+        assert summary_record["metadata"]["paragraph_count"] == 2
 
     def test_uploads_pdf_skips_empty_page_elements_and_preserves_page_gap(
         self,

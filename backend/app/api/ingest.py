@@ -18,9 +18,11 @@ from typing import Annotated
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from app.schemas import IngestResponse
+from app.services.engineering_converters import get_engineering_converter
+from app.services.engineering_files import classify
 from app.services.ingestion import (
-    SUPPORTED_EXTENSIONS,
     RegisteredIngestFile,
+    classify_and_route_registered_files,
     ingest_registered_files,
 )
 
@@ -76,20 +78,26 @@ async def ingest(
             should_process = True
         if should_process:
             processing_document_ids.add(record.document_id)
-        if should_process and (
-            not is_duplicate or not os.path.exists(record.stored_path)
-        ):
+        if should_process and (not is_duplicate or not os.path.exists(record.stored_path)):
             with open(record.stored_path, "wb") as out:
                 out.write(upload.body)
         entries.append(
-            RegisteredIngestFile(record=record, is_duplicate=not should_process)
+            RegisteredIngestFile(
+                record=record,
+                is_duplicate=not should_process,
+                classification=classify(upload.original_filename),
+            )
         )
 
+    engineering_converter = state.engineering_converter or get_engineering_converter(state.settings)
+    routed_entries = classify_and_route_registered_files(state.registry, entries)
     return await ingest_registered_files(
         state.kb,
         state.registry,
-        entries,
+        routed_entries,
         document_analyzer=state.document_analyzer,
+        engineering_converter=engineering_converter,
+        engineering_converter_output_dir=state.engineering_converter_output_dir,
     )
 
 
@@ -101,7 +109,7 @@ async def _prepare_uploads(
     prepared: list[_PreparedUpload] = []
     for upload in files:
         filename = _validated_filename(upload.filename)
-        extension = _validated_extension(filename)
+        extension = os.path.splitext(filename)[1].lower()
         body = await upload.read(max_upload_bytes + 1)
         if len(body) > max_upload_bytes:
             raise HTTPException(status_code=413, detail="uploaded file is too large")
@@ -129,10 +137,3 @@ def _validated_filename(filename: str | None) -> str:
     if not basename:
         raise HTTPException(status_code=400, detail="uploaded file is missing a filename")
     return basename
-
-
-def _validated_extension(filename: str) -> str:
-    extension = os.path.splitext(filename)[1].lower()
-    if extension not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(status_code=415, detail="unsupported file type")
-    return extension

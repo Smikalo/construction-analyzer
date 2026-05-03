@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     registry_db_path: str = "/app/data/registry.sqlite"
     max_upload_bytes: int = 25_000_000
 
+    # CAD/export conversion (optional; blank command template disables it)
+    engineering_converter_command_template: str = ""
+    engineering_converter_timeout_seconds: int = 30
+    engineering_converter_output_dir: str = "/app/data/conversions"
+    engineering_converter_output_extension: str = ".pdf"
+    engineering_converter_smoke_input_path: str = ""
+
     # Knowledge base backend selector: "fake" (tests/dev) or "memorypalace"
     kb_backend: Literal["fake", "memorypalace"] = "fake"
 

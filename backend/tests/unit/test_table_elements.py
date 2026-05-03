@@ -18,10 +18,7 @@ def test_table_to_markdown_renders_header_separator_and_rows() -> None:
     ]
 
     assert table_to_markdown(rows) == (
-        "| Spec | Value |\n"
-        "| --- | --- |\n"
-        "| Height | 10 m |\n"
-        "| Load | 5 kN |"
+        "| Spec | Value |\n| --- | --- |\n| Height | 10 m |\n| Load | 5 kN |"
     )
 
 
@@ -77,10 +74,7 @@ def test_ragged_rows_are_padded_and_warned() -> None:
 
     assert element is not None
     assert element.content == (
-        "| Item | Count | Notes |\n"
-        "| --- | --- | --- |\n"
-        "| Door | 4 |  |\n"
-        "| Window | 2 | tempered |"
+        "| Item | Count | Notes |\n| --- | --- | --- |\n| Door | 4 |  |\n| Window | 2 | tempered |"
     )
     assert element.warnings == (RAGGED_TABLE_WARNING,)
     assert element.metadata == {"table_rows": 3, "table_columns": 3}
