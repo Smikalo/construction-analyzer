@@ -32,11 +32,10 @@ EngineeringRole = Literal[
     "backup_or_temp",
     "unsupported",
 ]
-IngestionRoute = Literal["parser", "skip"]
+IngestionRoute = Literal["parser", "converter", "skip"]
 SkipReason = Literal[
     "docx_extractor_pending",
     "xlsx_extractor_pending",
-    "converter_pending",
     "image_extractor_pending",
     "backup_or_temp",
     "unsupported_extension",
@@ -96,8 +95,8 @@ def classify(filename: str, *, folder_segments: Sequence[str] = ()) -> Classific
     if extension in SUPPORTED_CAD_EXPORT_EXTENSIONS:
         return ClassificationResult(
             role="cad_export",
-            route="skip",
-            reason="converter_pending",
+            route="converter",
+            reason=None,
             extension=extension,
         )
     if extension in SUPPORTED_ENGINEERING_IMAGE_EXTENSIONS:

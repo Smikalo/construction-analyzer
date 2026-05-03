@@ -40,9 +40,7 @@ XLSX_MISSING_CACHED_VALUE_WARNING = "missing_cached_value"
 XLSX_AMBIGUOUS_UNIT_WARNING = "ambiguous_unit"
 XLSX_UNSUPPORTED_NAMED_RANGE_WARNING = "unsupported_named_range"
 
-_LABEL_UNIT_PATTERN = re.compile(
-    r"^(?P<label>.*?)(?:\s*[\(\[](?P<unit>[^()\[\]]+)[\)\]])\s*$"
-)
+_LABEL_UNIT_PATTERN = re.compile(r"^(?P<label>.*?)(?:\s*[\(\[](?P<unit>[^()\[\]]+)[\)\]])\s*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,9 +109,7 @@ def extract_xlsx(
                     extraction_mode=XLSX_SUMMARY_MODE,
                     content=_render_workbook_summary(sheet_names, workbook_stats),
                     confidence=1.0,
-                    warnings=(
-                        XLSX_UNSUPPORTED_NAMED_RANGE_WARNING,
-                    )
+                    warnings=(XLSX_UNSUPPORTED_NAMED_RANGE_WARNING,)
                     if unsupported_named_ranges
                     else (),
                     metadata=summary_metadata,

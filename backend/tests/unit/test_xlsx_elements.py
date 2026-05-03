@@ -174,10 +174,7 @@ def test_extract_xlsx_emits_literal_formula_comment_and_missing_cache_facts(
     assert literal.warnings == ()
 
     assert cached_formula.content == (
-        "Sheet: Calculation Sheet\n"
-        "Cell: B1\n"
-        "Formula: =SUM(1, 2)\n"
-        "Cached value: 3"
+        "Sheet: Calculation Sheet\nCell: B1\nFormula: =SUM(1, 2)\nCached value: 3"
     )
     assert cached_formula.metadata == {
         "subject": "engineering_workbook",
@@ -194,9 +191,7 @@ def test_extract_xlsx_emits_literal_formula_comment_and_missing_cache_facts(
     assert cached_formula.warnings == ()
 
     assert comment.content == (
-        "Sheet: Calculation Sheet\n"
-        "Cell: C1\n"
-        "Comment by Planner: Needs review"
+        "Sheet: Calculation Sheet\nCell: C1\nComment by Planner: Needs review"
     )
     assert comment.metadata == {
         "subject": "engineering_workbook",
@@ -210,10 +205,7 @@ def test_extract_xlsx_emits_literal_formula_comment_and_missing_cache_facts(
     assert comment.warnings == ()
 
     assert missing_formula.content == (
-        "Sheet: Calculation Sheet\n"
-        "Cell: D1\n"
-        "Formula: =AVERAGE(4, 6)\n"
-        "Cached value: <missing>"
+        "Sheet: Calculation Sheet\nCell: D1\nFormula: =AVERAGE(4, 6)\nCached value: <missing>"
     )
     assert missing_formula.metadata == {
         "subject": "engineering_workbook",
@@ -245,18 +237,12 @@ def test_extract_xlsx_preserves_hidden_sheet_comment_provenance_and_skips_blank_
 
     elements = extract_xlsx(str(path), source="hidden.xlsx", document_id="xlsx-3")
     hidden_elements = [
-        element
-        for element in elements[3:]
-        if element.metadata.get("xlsx_sheet") == "Hidden"
+        element for element in elements[3:] if element.metadata.get("xlsx_sheet") == "Hidden"
     ]
 
     assert [element.element_type for element in hidden_elements] == ["comment"]
     hidden_comment = hidden_elements[0]
-    assert hidden_comment.content == (
-        "Sheet: Hidden\n"
-        "Cell: B2\n"
-        "Comment by Planner: Hidden note"
-    )
+    assert hidden_comment.content == ("Sheet: Hidden\nCell: B2\nComment by Planner: Hidden note")
     assert hidden_comment.metadata == {
         "subject": "engineering_workbook",
         "xlsx_sheet": "Hidden",
@@ -294,9 +280,7 @@ def test_extract_xlsx_emits_table_and_named_range_facts(tmp_path: Path) -> None:
     sheet["E1"] = "Amount"
     sheet["D2"] = "North"
     sheet["E2"] = 5
-    workbook.defined_names.add(
-        DefinedName("RangeBlock", attr_text="Sheet1!$D$1:$E$2")
-    )
+    workbook.defined_names.add(DefinedName("RangeBlock", attr_text="Sheet1!$D$1:$E$2"))
 
     path = _save_workbook(workbook, tmp_path, "factbook.xlsx")
 
@@ -307,9 +291,7 @@ def test_extract_xlsx_emits_table_and_named_range_facts(tmp_path: Path) -> None:
 
     named_range, table = facts
     assert named_range.extraction_mode == "xlsx_range"
-    assert named_range.content == (
-        "| Name | Amount |\n| --- | --- |\n| North | 5 |"
-    )
+    assert named_range.content == ("| Name | Amount |\n| --- | --- |\n| North | 5 |")
     assert named_range.confidence == 1.0
     assert named_range.warnings == ()
     assert named_range.metadata == {
@@ -323,9 +305,7 @@ def test_extract_xlsx_emits_table_and_named_range_facts(tmp_path: Path) -> None:
     }
 
     assert table.extraction_mode == "xlsx_table"
-    assert table.content == (
-        "| Item | Value |\n| --- | --- |\n| A | 1 |\n| B | 2 |"
-    )
+    assert table.content == ("| Item | Value |\n| --- | --- |\n| A | 1 |\n| B | 2 |")
     assert table.confidence == 1.0
     assert table.warnings == ()
     assert table.metadata == {
@@ -388,9 +368,7 @@ def test_extract_xlsx_marks_ambiguous_units_and_unsupported_named_ranges(
     workbook.defined_names.add(
         DefinedName("DynamicRange", attr_text="OFFSET(Conflict!$A$1,0,0,2,1)")
     )
-    workbook.defined_names.add(
-        DefinedName("ExternalRange", attr_text="[Book2.xlsx]Conflict!$A$1")
-    )
+    workbook.defined_names.add(DefinedName("ExternalRange", attr_text="[Book2.xlsx]Conflict!$A$1"))
 
     path = _save_workbook(workbook, tmp_path, "conflict.xlsx")
 

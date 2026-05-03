@@ -51,8 +51,8 @@ from app.services.engineering_files import (
             "drawing.dwg",
             ClassificationResult(
                 role="cad_export",
-                route="skip",
-                reason="converter_pending",
+                route="converter",
+                reason=None,
                 extension=".dwg",
             ),
         ),

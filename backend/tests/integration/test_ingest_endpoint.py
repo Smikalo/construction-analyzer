@@ -23,6 +23,7 @@ from app.services.document_analysis import (
     build_document_analyzer,
 )
 from app.services.document_elements import DocumentElement
+from app.services.engineering_converters import ConversionResult
 from app.services.ocr_elements import ocr_element_from_text
 from app.services.table_elements import RAGGED_TABLE_WARNING, table_element_from_rows
 from app.services.visual_elements import APPROXIMATE_VALUE_WARNING, visual_element_from_summary
@@ -78,6 +79,19 @@ def _build_visual_analyzer(
     return analyzer, analysis_client
 
 
+class RecordingEngineeringConverter:
+    def __init__(self, convert) -> None:
+        self.calls: list[str] = []
+        self._convert = convert
+
+    def convert(self, source_path: str) -> ConversionResult:
+        self.calls.append(source_path)
+        return self._convert(source_path)
+
+    def get_diagnostics(self) -> dict[str, object]:
+        return {"calls": len(self.calls)}
+
+
 def _build_xlsx_workbook_bytes() -> bytes:
     workbook = Workbook()
     visible_sheet = workbook.active
@@ -101,6 +115,22 @@ def _build_xlsx_workbook_bytes() -> bytes:
 
 
 class TestIngestEndpoint:
+    @staticmethod
+    def _make_converted_result(source_path: str, converted_path: Path) -> ConversionResult:
+        converted_path.parent.mkdir(parents=True, exist_ok=True)
+        converted_path.write_text("converted north drawing", encoding="utf-8")
+        return ConversionResult(
+            success=True,
+            status="success",
+            output_path=str(converted_path),
+            warnings=(),
+            error=None,
+            diagnostics={"fake": True, "source_path": source_path},
+            command_exit_code=0,
+            timeout_seconds=30,
+            source_extension=Path(source_path).suffix.lower(),
+        )
+
     def test_uploads_text_file(self, client: TestClient, tmp_path: Path) -> None:
         # Redirect documents_dir into the test tmpdir so we don't write
         # outside the sandbox.
@@ -315,7 +345,7 @@ class TestIngestEndpoint:
             pytest.param(
                 "north.dwg",
                 "application/acad",
-                "converter_pending",
+                "missing_configuration",
                 b"dwg body",
                 id="dwg",
             ),
@@ -361,6 +391,76 @@ class TestIngestEndpoint:
         assert record.memory_ids == []
         assert Path(record.stored_path).exists()
         assert Path(record.stored_path).read_bytes() == body_bytes
+
+    def test_uploads_cad_export_through_converter_seam(
+        self,
+        client: TestClient,
+        fake_kb: FakeKB,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client.app.state.app_state.settings.documents_dir = str(tmp_path)
+        converted_dir = tmp_path / "converted"
+        converted_path = converted_dir / "north.pdf"
+        converter = RecordingEngineeringConverter(
+            lambda source_path: self._make_converted_result(source_path, converted_path)
+        )
+        client.app.state.app_state.engineering_converter = converter
+        client.app.state.app_state.engineering_converter_output_dir = str(converted_dir)
+
+        def fake_parse_document(
+            path: str,
+            *,
+            source: str,
+            document_id: str | None = None,
+        ) -> list[DocumentElement]:
+            assert Path(path) == converted_path
+            assert source == "north.dwg"
+            assert document_id is not None
+            return [
+                DocumentElement(
+                    document_id=document_id,
+                    source=source,
+                    path=path,
+                    page=1,
+                    element_type="paragraph",
+                    extraction_mode="pdf_text",
+                    content="converted north drawing",
+                )
+            ]
+
+        monkeypatch.setattr(ingestion_module.parsers, "parse_document", fake_parse_document)
+        body_bytes = b"dwg body"
+
+        response = client.post(
+            "/api/ingest",
+            files=[("files", ("north.dwg", io.BytesIO(body_bytes), "application/acad"))],
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ingested_files"] == 1
+        assert body["ingested_chunks"] == 1
+        records = fake_kb.dump()
+        assert len(records) == 1
+
+        registry_record = client.app.state.app_state.registry.get_by_hash(
+            hashlib.sha256(body_bytes).hexdigest()
+        )
+        assert registry_record is not None
+        assert registry_record.status == "indexed"
+        assert registry_record.error is None
+        assert registry_record.memory_ids == body["memory_ids"]
+        assert converter.calls == [registry_record.stored_path]
+        assert Path(registry_record.stored_path).exists()
+        assert Path(converted_path).exists()
+        assert records[0]["content"].startswith(
+            "[source=north.dwg; page=1; element=paragraph; extraction=pdf_text]"
+        )
+        assert records[0]["content"].endswith("converted north drawing")
+        assert records[0]["metadata"]["source"] == "north.dwg"
+        assert records[0]["metadata"]["document_id"] == registry_record.document_id
+        assert records[0]["metadata"]["path"] == str(converted_path)
 
     def test_uploads_xlsx_emits_summary_sheet_formula_value_comment_and_table_memories(
         self,

@@ -18,6 +18,8 @@ from typing import Annotated
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from app.schemas import IngestResponse
+from app.services.engineering_converters import get_engineering_converter
+from app.services.engineering_files import classify
 from app.services.ingestion import (
     RegisteredIngestFile,
     classify_and_route_registered_files,
@@ -79,14 +81,25 @@ async def ingest(
         if should_process and (not is_duplicate or not os.path.exists(record.stored_path)):
             with open(record.stored_path, "wb") as out:
                 out.write(upload.body)
-        entries.append(RegisteredIngestFile(record=record, is_duplicate=not should_process))
+        entries.append(
+            RegisteredIngestFile(
+                record=record,
+                is_duplicate=not should_process,
+                classification=classify(upload.original_filename),
+            )
+        )
 
+    engineering_converter = state.engineering_converter or get_engineering_converter(
+        state.settings
+    )
     routed_entries = classify_and_route_registered_files(state.registry, entries)
     return await ingest_registered_files(
         state.kb,
         state.registry,
         routed_entries,
         document_analyzer=state.document_analyzer,
+        engineering_converter=engineering_converter,
+        engineering_converter_output_dir=state.engineering_converter_output_dir,
     )
 
 

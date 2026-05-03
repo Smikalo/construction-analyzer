@@ -151,10 +151,10 @@ class TestDocumentRegistry:
             skipped = registry.update_status(
                 record.document_id,
                 "skipped",
-                error="converter_pending",
+                error="missing_configuration",
             )
             assert skipped.status == "skipped"
-            assert skipped.error == "converter_pending"
+            assert skipped.error == "missing_configuration"
             assert skipped.memory_ids == []
 
             with pytest.raises(ValueError, match="invalid document status"):

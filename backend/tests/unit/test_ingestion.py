@@ -15,6 +15,7 @@ from app.services import ingestion as ingestion_module
 from app.services.document_analysis import OPENAI_ENRICHMENT_FAILED_WARNING
 from app.services.document_elements import DocumentElement
 from app.services.document_registry import lifespan_document_registry
+from app.services.engineering_converters import ConversionResult
 from app.services.ingestion import (
     DEFAULT_CHUNK_SIZE,
     RegisteredIngestFile,
@@ -101,6 +102,19 @@ class VisualOnlyAnalyzer:
 class FailingAnalyzer:
     def enrich(self, elements: Sequence[DocumentElement]) -> list[DocumentElement]:
         raise AssertionError(f"analyzer should not have been called for: {list(elements)!r}")
+
+
+class RecordingEngineeringConverter:
+    def __init__(self, convert) -> None:
+        self.calls: list[str] = []
+        self._convert = convert
+
+    def convert(self, source_path: str) -> ConversionResult:
+        self.calls.append(source_path)
+        return self._convert(source_path)
+
+    def get_diagnostics(self) -> dict[str, object]:
+        return {"calls": len(self.calls)}
 
 
 class TestChunker:
@@ -851,6 +865,104 @@ class TestIngestRegisteredFiles:
             assert result.ingested_chunks == 0
             assert result.memory_ids == []
 
+    async def test_registered_converter_failure_marks_failed_and_continues_batch(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        dwg_path = tmp_path / "north.dwg"
+        dwg_path.write_bytes(b"dwg body")
+        txt_path = tmp_path / "notes.txt"
+        txt_path.write_text("batch text")
+        converted_dir = tmp_path / "converted"
+        converted_path = converted_dir / "north.pdf"
+        kb = FakeKB()
+
+        def convert(source_path: str) -> ConversionResult:
+            assert source_path == str(dwg_path)
+            return ConversionResult(
+                success=False,
+                status="timeout",
+                output_path=str(converted_path),
+                warnings=("converter_timeout",),
+                error="converter timed out after 1s",
+                diagnostics={"fake": True, "source_path": source_path},
+                command_exit_code=None,
+                timeout_seconds=1,
+                source_extension=".dwg",
+            )
+
+        converter = RecordingEngineeringConverter(convert)
+
+        def fake_parse_document(
+            parser_path: str,
+            *,
+            source: str,
+            document_id: str | None = None,
+        ) -> list[DocumentElement]:
+            assert document_id is not None
+            if parser_path == str(txt_path):
+                assert source == "notes.txt"
+                return [
+                    DocumentElement(
+                        document_id=document_id,
+                        source=source,
+                        path=parser_path,
+                        page=1,
+                        element_type="paragraph",
+                        extraction_mode="text",
+                        content="parsed batch text",
+                    )
+                ]
+            raise AssertionError(f"unexpected parse target: {parser_path}")
+
+        monkeypatch.setattr(ingestion_module.parsers, "parse_document", fake_parse_document)
+
+        async with lifespan_document_registry(":memory:") as registry:
+            dwg_record, _ = registry.register_or_get(
+                "hash-converter-timeout",
+                original_filename="north.dwg",
+                stored_path=str(dwg_path),
+                content_type="application/acad",
+                byte_size=dwg_path.stat().st_size,
+            )
+            txt_record, _ = registry.register_or_get(
+                "hash-batch-text",
+                original_filename="notes.txt",
+                stored_path=str(txt_path),
+                content_type="text/plain",
+                byte_size=txt_path.stat().st_size,
+            )
+
+            result = await ingest_registered_files(
+                kb,
+                registry,
+                [
+                    RegisteredIngestFile(record=dwg_record, is_duplicate=False),
+                    RegisteredIngestFile(record=txt_record, is_duplicate=False),
+                ],
+                engineering_converter=converter,
+                engineering_converter_output_dir=str(converted_dir),
+            )
+
+            updated_dwg = registry.get_by_id(dwg_record.document_id)
+            assert updated_dwg is not None
+            assert updated_dwg.status == "failed"
+            assert updated_dwg.error == "converter timed out after 1s"
+            assert updated_dwg.memory_ids == []
+
+            updated_txt = registry.get_by_id(txt_record.document_id)
+            assert updated_txt is not None
+            assert updated_txt.status == "indexed"
+            assert updated_txt.error is None
+            assert len(updated_txt.memory_ids) == 1
+
+            assert result.ingested_files == 1
+            assert result.ingested_chunks == 1
+            assert len(result.memory_ids) == 1
+            assert converter.calls == [str(dwg_path)]
+            assert len(kb.dump()) == 1
+
 
 class TestIngestDirectory:
     async def test_ingests_text_extensions_through_classifier(
@@ -1002,7 +1114,7 @@ class TestIngestDirectory:
             dwg_record = registry.get_by_hash(hashlib.sha256(dwg_body).hexdigest())
             assert dwg_record is not None
             assert dwg_record.status == "skipped"
-            assert dwg_record.error == "converter_pending"
+            assert dwg_record.error == "missing_configuration"
             assert dwg_record.original_filename == "north.dwg"
             assert Path(dwg_record.stored_path).parent == nested_dir
 
@@ -1114,6 +1226,188 @@ class TestIngestDirectory:
             assert len(memories) == 1
             assert memories[0]["metadata"]["analysis_status"] == "enriched"
             assert memories[0]["metadata"]["analysis_provider"] == "fake-openai"
+
+    async def test_ingest_directory_uses_engineering_converter_for_cad_exports(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        top_body = b"top level text"
+        pdf_body = b"%PDF-1.7\nplan"
+        dwg_body = b"dwg body"
+        archive_body = b"old archived text"
+        bin_body = b"\x00\x01\x02\x03"
+        hidden_body = b"hidden content"
+
+        nested_dir = tmp_path / "nested"
+        nested_dir.mkdir()
+        archive_dir = tmp_path / "archive"
+        archive_dir.mkdir()
+        hidden_dir = tmp_path / ".git"
+        hidden_dir.mkdir()
+
+        xlsx_path = nested_dir / "sheet.xlsx"
+        workbook = Workbook()
+        workbook.active.title = "Loads"
+        workbook.active["A1"] = "Folder workbook"
+        workbook.save(xlsx_path)
+        xlsx_body = xlsx_path.read_bytes()
+
+        converted_dir = tmp_path / "converted"
+        converted_path = converted_dir / "north.pdf"
+
+        (tmp_path / "top.txt").write_bytes(top_body)
+        (nested_dir / "plan.pdf").write_bytes(pdf_body)
+        (nested_dir / "north.dwg").write_bytes(dwg_body)
+        (archive_dir / "old.txt").write_bytes(archive_body)
+        (tmp_path / "mystery.bin").write_bytes(bin_body)
+        (hidden_dir / "ignored.txt").write_bytes(hidden_body)
+
+        def convert(source_path: str) -> ConversionResult:
+            assert source_path == str(nested_dir / "north.dwg")
+            converted_path.parent.mkdir(parents=True, exist_ok=True)
+            converted_path.write_text("converted north drawing", encoding="utf-8")
+            return ConversionResult(
+                success=True,
+                status="success",
+                output_path=str(converted_path),
+                warnings=(),
+                error=None,
+                diagnostics={"fake": True, "source_path": source_path},
+                command_exit_code=0,
+                timeout_seconds=30,
+                source_extension=".dwg",
+            )
+
+        converter = RecordingEngineeringConverter(convert)
+
+        def fake_parse_document(
+            parser_path: str,
+            *,
+            source: str,
+            document_id: str | None = None,
+        ) -> list[DocumentElement]:
+            assert document_id is not None
+            if parser_path == str(xlsx_path):
+                assert source == "sheet.xlsx"
+                return ingestion_module.parsers.parse_xlsx(
+                    parser_path,
+                    source=source,
+                    document_id=document_id,
+                )
+            if parser_path == str(nested_dir / "plan.pdf"):
+                assert source == "plan.pdf"
+                return [
+                    DocumentElement(
+                        document_id=document_id,
+                        source=source,
+                        path=parser_path,
+                        page=1,
+                        element_type="paragraph",
+                        extraction_mode="pdf_text",
+                        content="parsed plan",
+                    )
+                ]
+            if parser_path == str(tmp_path / "top.txt"):
+                assert source == "top.txt"
+                return [
+                    DocumentElement(
+                        document_id=document_id,
+                        source=source,
+                        path=parser_path,
+                        element_type="paragraph",
+                        extraction_mode="text",
+                        content="parsed top",
+                    )
+                ]
+            if parser_path == str(converted_path):
+                assert source == "north.dwg"
+                return [
+                    DocumentElement(
+                        document_id=document_id,
+                        source=source,
+                        path=parser_path,
+                        page=1,
+                        element_type="paragraph",
+                        extraction_mode="pdf_text",
+                        content="parsed converted north",
+                    )
+                ]
+            raise AssertionError(f"unexpected parse target: {parser_path}")
+
+        monkeypatch.setattr(ingestion_module.parsers, "parse_document", fake_parse_document)
+
+        kb = FakeKB()
+        async with lifespan_document_registry(":memory:") as registry:
+            result = await ingest_directory(
+                kb,
+                registry,
+                str(tmp_path),
+                engineering_converter=converter,
+                engineering_converter_output_dir=str(converted_dir),
+            )
+
+            assert result.ingested_files == 4
+            assert result.ingested_chunks == 6
+            assert len(kb.dump()) == 6
+            assert converter.calls == [str(nested_dir / "north.dwg")]
+
+            top_record = registry.get_by_hash(hashlib.sha256(top_body).hexdigest())
+            assert top_record is not None
+            assert top_record.status == "indexed"
+            assert top_record.error is None
+            assert top_record.original_filename == "top.txt"
+            assert Path(top_record.stored_path).parent == tmp_path
+
+            pdf_record = registry.get_by_hash(hashlib.sha256(pdf_body).hexdigest())
+            assert pdf_record is not None
+            assert pdf_record.status == "indexed"
+            assert pdf_record.error is None
+            assert pdf_record.original_filename == "plan.pdf"
+            assert Path(pdf_record.stored_path).parent == nested_dir
+
+            xlsx_record = registry.get_by_hash(hashlib.sha256(xlsx_body).hexdigest())
+            assert xlsx_record is not None
+            assert xlsx_record.status == "indexed"
+            assert xlsx_record.error is None
+            assert xlsx_record.original_filename == "sheet.xlsx"
+            assert Path(xlsx_record.stored_path).parent == nested_dir
+            assert len(xlsx_record.memory_ids) == 3
+
+            dwg_record = registry.get_by_hash(hashlib.sha256(dwg_body).hexdigest())
+            assert dwg_record is not None
+            assert dwg_record.status == "indexed"
+            assert dwg_record.error is None
+            assert dwg_record.original_filename == "north.dwg"
+            assert Path(dwg_record.stored_path).parent == nested_dir
+            assert len(dwg_record.memory_ids) == 1
+
+            archive_record = registry.get_by_hash(hashlib.sha256(archive_body).hexdigest())
+            assert archive_record is not None
+            assert archive_record.status == "skipped"
+            assert archive_record.error == "backup_or_temp"
+            assert archive_record.original_filename == "old.txt"
+            assert Path(archive_record.stored_path).parent == archive_dir
+
+            bin_record = registry.get_by_hash(hashlib.sha256(bin_body).hexdigest())
+            assert bin_record is not None
+            assert bin_record.status == "skipped"
+            assert bin_record.error == "unsupported_extension"
+            assert bin_record.original_filename == "mystery.bin"
+            assert Path(bin_record.stored_path).parent == tmp_path
+
+            hidden_record = registry.get_by_hash(hashlib.sha256(hidden_body).hexdigest())
+            assert hidden_record is None
+
+            memories = kb.dump()
+            dwg_memory = next(
+                record for record in memories if record["metadata"]["source"] == "north.dwg"
+            )
+            assert dwg_memory["content"].startswith(
+                "[source=north.dwg; page=1; element=paragraph; extraction=pdf_text]"
+            )
+            assert dwg_memory["content"].endswith("parsed converted north")
+            assert dwg_memory["metadata"]["path"] == str(converted_path)
 
     async def test_missing_directory_is_a_noop(self, tmp_path: Path) -> None:
         kb = FakeKB()
