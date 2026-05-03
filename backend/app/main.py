@@ -26,6 +26,7 @@ from app.kb.base import KnowledgeBase
 from app.services.document_analysis import DocumentAnalyzer, build_document_analyzer
 from app.services.document_registry import DocumentRegistry, lifespan_document_registry
 from app.services.engineering_converters import EngineeringConverter, get_engineering_converter
+from app.services.report_sessions import ReportSessionStore, lifespan_report_sessions
 
 
 @dataclass
@@ -35,6 +36,7 @@ class AppState:
     kb: KnowledgeBase
     checkpointer: BaseCheckpointSaver
     registry: DocumentRegistry
+    report_sessions: ReportSessionStore
     graph: Any  # CompiledStateGraph; not exposed in stable types
     document_analyzer: DocumentAnalyzer | None = None
     engineering_converter: EngineeringConverter | None = None
@@ -47,6 +49,7 @@ def build_app_state(
     kb: KnowledgeBase,
     checkpointer: BaseCheckpointSaver,
     registry: DocumentRegistry,
+    report_sessions: ReportSessionStore,
     graph: Any,
     settings: Settings | None = None,
     document_analyzer: DocumentAnalyzer | None = None,
@@ -68,6 +71,7 @@ def build_app_state(
         kb=kb,
         checkpointer=checkpointer,
         registry=registry,
+        report_sessions=report_sessions,
         graph=graph,
         document_analyzer=document_analyzer,
         engineering_converter=active_engineering_converter,
@@ -100,20 +104,24 @@ async def _production_lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     async with lifespan_checkpointer(settings.checkpoint_db_path) as checkpointer:
         async with lifespan_document_registry(settings.registry_db_path) as registry:
-            graph = build_graph(llm=llm, kb=kb, checkpointer=checkpointer)
-            engineering_converter = get_engineering_converter(settings)
-            app.state.app_state = build_app_state(
-                llm=llm,
-                kb=kb,
-                checkpointer=checkpointer,
-                registry=registry,
-                graph=graph,
-                settings=settings,
-                document_analyzer=document_analyzer,
-                engineering_converter=engineering_converter,
-                engineering_converter_output_dir=settings.engineering_converter_output_dir,
-            )
-            yield
+            async with lifespan_report_sessions(
+                settings.report_sessions_db_path
+            ) as report_sessions:
+                graph = build_graph(llm=llm, kb=kb, checkpointer=checkpointer)
+                engineering_converter = get_engineering_converter(settings)
+                app.state.app_state = build_app_state(
+                    llm=llm,
+                    kb=kb,
+                    checkpointer=checkpointer,
+                    registry=registry,
+                    report_sessions=report_sessions,
+                    graph=graph,
+                    settings=settings,
+                    document_analyzer=document_analyzer,
+                    engineering_converter=engineering_converter,
+                    engineering_converter_output_dir=settings.engineering_converter_output_dir,
+                )
+                yield
 
 
 def build_app(*, state: AppState | None = None) -> FastAPI:
