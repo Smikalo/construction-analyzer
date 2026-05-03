@@ -2,7 +2,7 @@
 
 import { useChatStore } from "@/lib/store";
 
-type IconKey = "project" | "graph" | "settings" | "guidelines";
+type IconKey = "project" | "graph" | "report" | "settings" | "guidelines";
 
 const Icon = ({ k }: { k: IconKey }) => {
   switch (k) {
@@ -26,6 +26,12 @@ const Icon = ({ k }: { k: IconKey }) => {
           />
         </svg>
       );
+    case "report":
+      return (
+        <svg viewBox="0 0 16 16" className="h-4 w-4" fill="currentColor">
+          <path d="M5 1h6a1 1 0 011 1v1h1.5A1.5 1.5 0 0115 4.5v9A1.5 1.5 0 0113.5 15h-11A1.5 1.5 0 011 13.5v-9A1.5 1.5 0 012.5 3H4V2a1 1 0 011-1zm0 3h6V2H5v2zm0 2h6v1H5V6zm0 2h6v1H5V8z" />
+        </svg>
+      );
     case "guidelines":
       return (
         <svg viewBox="0 0 16 16" className="h-4 w-4" fill="currentColor">
@@ -43,12 +49,36 @@ const Icon = ({ k }: { k: IconKey }) => {
 };
 
 export function ActivityBar() {
+  const activeView = useChatStore((s) => s.activeView);
+  const activeReportId = useChatStore((s) => s.activeReportId);
+  const setActiveView = useChatStore((s) => s.setActiveView);
   const setSettingsOpen = useChatStore((s) => s.setSettingsOpen);
   const setSettingsTab = useChatStore((s) => s.setSettingsTab);
 
-  const items: { key: IconKey; title: string; onClick?: () => void; active?: boolean }[] = [
+  const items: {
+    key: IconKey;
+    title: string;
+    active?: boolean;
+    pressed?: boolean;
+    disabled?: boolean;
+    onClick?: () => void;
+  }[] = [
     { key: "project", title: "bob-project", active: true },
-    { key: "graph", title: "bob-graph" },
+    {
+      key: "graph",
+      title: "bob-graph",
+      active: activeView === "graph",
+      pressed: activeView === "graph",
+      onClick: () => setActiveView("graph"),
+    },
+    {
+      key: "report",
+      title: "bob-report",
+      active: activeView === "report",
+      pressed: activeView === "report",
+      disabled: activeReportId === null,
+      onClick: () => setActiveView("report"),
+    },
     {
       key: "guidelines",
       title: "bob-regulations",
@@ -80,13 +110,17 @@ export function ActivityBar() {
       {items.map((it) => (
         <button
           key={it.key}
+          type="button"
           title={it.title}
+          aria-label={it.title}
+          aria-pressed={it.pressed}
+          disabled={it.disabled}
           onClick={it.onClick}
           className={`mt-1 grid h-9 w-9 place-items-center rounded-lg transition ${
             it.active
               ? "bg-brand-blue-soft text-brand-blue"
               : "text-brand-subtle hover:bg-white hover:text-brand-ink"
-          }`}
+          } ${it.disabled ? "cursor-not-allowed opacity-40" : ""}`}
         >
           <Icon k={it.key} />
         </button>
