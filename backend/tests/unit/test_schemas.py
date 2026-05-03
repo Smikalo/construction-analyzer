@@ -15,6 +15,18 @@ from app.schemas import (
     IngestResponse,
     Message,
     ReadinessStatus,
+    ReportArtifact,
+    ReportCardPayload,
+    ReportExport,
+    ReportGate,
+    ReportGateAnswerRequest,
+    ReportGatePayload,
+    ReportLog,
+    ReportSession,
+    ReportSessionLaunchRequest,
+    ReportSessionLaunchResponse,
+    ReportStage,
+    ReportValidationFinding,
     ThreadHistory,
     ThreadInfo,
 )
@@ -43,7 +55,22 @@ class TestChatChunk:
     def test_token_chunk_round_trip(self) -> None:
         chunk = ChatChunk(type="token", data="hello")
         as_dict = chunk.model_dump()
-        assert as_dict == {"type": "token", "data": "hello"}
+        assert as_dict == {"type": "token", "data": "hello", "payload": {}}
+
+    def test_report_chunk_round_trip(self) -> None:
+        chunk = ChatChunk(
+            type="report_card",
+            data="stage started",
+            payload={"session_id": "session-1", "stage_id": "stage-1"},
+        )
+
+        assert ChatChunk.model_validate(chunk.model_dump()) == chunk
+
+    def test_payload_defaults_to_empty_dict_when_omitted(self) -> None:
+        chunk = ChatChunk(type="report_gate", data="gate opened")
+
+        assert chunk.payload == {}
+        assert chunk.model_dump()["payload"] == {}
 
     def test_done_chunk(self) -> None:
         chunk = ChatChunk(type="done", data="")
@@ -129,3 +156,295 @@ class TestIngestResponse:
         )
         assert r.ingested_files == 2
         assert len(r.memory_ids) == 5
+
+
+class TestReportSchemas:
+    @pytest.mark.parametrize(
+        ("model_cls", "kwargs"),
+        [
+            (
+                ReportSession,
+                {
+                    "session_id": "session-1",
+                    "status": "active",
+                    "current_stage": "drafting",
+                    "created_at": "2026-05-03T00:00:00Z",
+                    "updated_at": "2026-05-03T00:01:00Z",
+                    "last_error": None,
+                    "metadata": {"report": "alpha"},
+                },
+            ),
+            (
+                ReportStage,
+                {
+                    "stage_id": "stage-1",
+                    "session_id": "session-1",
+                    "name": "drafting",
+                    "status": "active",
+                    "started_at": "2026-05-03T00:00:01Z",
+                    "completed_at": None,
+                    "summary": "Drafting started",
+                    "error": None,
+                },
+            ),
+            (
+                ReportGate,
+                {
+                    "gate_id": "gate-1",
+                    "session_id": "session-1",
+                    "stage_id": "stage-1",
+                    "status": "open",
+                    "question": {"prompt": "Proceed?"},
+                    "answer": {},
+                    "created_at": "2026-05-03T00:00:02Z",
+                    "closed_at": None,
+                },
+            ),
+            (
+                ReportCardPayload,
+                {
+                    "session_id": "session-1",
+                    "stage_id": "stage-1",
+                    "stage_name": "drafting",
+                    "kind": "stage_started",
+                    "message": "Stage started",
+                    "created_at": "2026-05-03T00:00:02Z",
+                    "payload": {"progress": 0.25},
+                },
+            ),
+            (
+                ReportGatePayload,
+                {
+                    "session_id": "session-1",
+                    "gate_id": "gate-1",
+                    "stage_id": "stage-1",
+                    "question": {"prompt": "Proceed?"},
+                    "status": "open",
+                    "created_at": "2026-05-03T00:00:02Z",
+                },
+            ),
+            (
+                ReportSessionLaunchResponse,
+                {
+                    "session_id": "session-1",
+                    "status": "active",
+                    "current_stage": "drafting",
+                    "resumed": True,
+                },
+            ),
+            (
+                ReportArtifact,
+                {
+                    "artifact_id": "artifact-1",
+                    "session_id": "session-1",
+                    "stage_id": "stage-1",
+                    "kind": "section_plan",
+                    "content": {"sections": ["intro"]},
+                    "created_at": "2026-05-03T00:00:03Z",
+                },
+            ),
+            (
+                ReportLog,
+                {
+                    "log_id": "log-1",
+                    "session_id": "session-1",
+                    "stage_id": "stage-1",
+                    "level": "info",
+                    "message": "stage started",
+                    "payload": {"provenance": ["stage-1"]},
+                    "created_at": "2026-05-03T00:00:04Z",
+                },
+            ),
+            (
+                ReportValidationFinding,
+                {
+                    "finding_id": "finding-1",
+                    "session_id": "session-1",
+                    "severity": "warning",
+                    "code": "UNCERTAIN_SOURCE",
+                    "message": "missing appendix provenance",
+                    "payload": {"source_ids": ["doc-1"]},
+                    "created_at": "2026-05-03T00:00:05Z",
+                },
+            ),
+            (
+                ReportExport,
+                {
+                    "export_id": "export-1",
+                    "session_id": "session-1",
+                    "status": "ready",
+                    "format": "pdf",
+                    "output_path": "reports/report.pdf",
+                    "diagnostics": {"pages": 12},
+                    "created_at": "2026-05-03T00:00:06Z",
+                    "completed_at": "2026-05-03T00:02:00Z",
+                },
+            ),
+        ],
+    )
+    def test_report_model_round_trip(self, model_cls, kwargs) -> None:
+        model = model_cls(**kwargs)
+        assert model_cls.model_validate(model.model_dump()) == model
+
+    @pytest.mark.parametrize(
+        ("model_cls", "kwargs"),
+        [
+            (
+                ReportSession,
+                {
+                    "session_id": "session-1",
+                    "status": "bogus",
+                    "created_at": "2026-05-03T00:00:00Z",
+                },
+            ),
+            (
+                ReportStage,
+                {
+                    "stage_id": "stage-1",
+                    "session_id": "session-1",
+                    "name": "drafting",
+                    "status": "bogus",
+                },
+            ),
+            (
+                ReportGate,
+                {
+                    "gate_id": "gate-1",
+                    "session_id": "session-1",
+                    "status": "bogus",
+                    "question": {},
+                    "created_at": "2026-05-03T00:00:02Z",
+                },
+            ),
+            (
+                ReportArtifact,
+                {
+                    "artifact_id": "artifact-1",
+                    "session_id": "session-1",
+                    "kind": "bogus",
+                    "content": {},
+                    "created_at": "2026-05-03T00:00:03Z",
+                },
+            ),
+            (
+                ReportLog,
+                {
+                    "log_id": "log-1",
+                    "session_id": "session-1",
+                    "level": "bogus",
+                    "message": "stage started",
+                    "created_at": "2026-05-03T00:00:04Z",
+                },
+            ),
+            (
+                ReportValidationFinding,
+                {
+                    "finding_id": "finding-1",
+                    "session_id": "session-1",
+                    "severity": "bogus",
+                    "message": "missing appendix provenance",
+                    "created_at": "2026-05-03T00:00:05Z",
+                },
+            ),
+            (
+                ReportExport,
+                {
+                    "export_id": "export-1",
+                    "session_id": "session-1",
+                    "status": "bogus",
+                    "format": "pdf",
+                    "created_at": "2026-05-03T00:00:06Z",
+                },
+            ),
+        ],
+    )
+    def test_unknown_status_strings_are_rejected(self, model_cls, kwargs) -> None:
+        with pytest.raises(ValidationError):
+            model_cls(**kwargs)
+
+    def test_json_payload_fields_default_to_empty_dicts(self) -> None:
+        session = ReportSession(session_id="session-1", created_at="2026-05-03T00:00:00Z")
+        gate = ReportGate(
+            gate_id="gate-1", session_id="session-1", created_at="2026-05-03T00:00:01Z"
+        )
+        log = ReportLog(
+            log_id="log-1",
+            session_id="session-1",
+            level="info",
+            message="ok",
+            created_at="2026-05-03T00:00:02Z",
+        )
+        finding = ReportValidationFinding(
+            finding_id="finding-1",
+            session_id="session-1",
+            severity="info",
+            message="note",
+            created_at="2026-05-03T00:00:03Z",
+        )
+        export = ReportExport(
+            export_id="export-1",
+            session_id="session-1",
+            format="pdf",
+            created_at="2026-05-03T00:00:04Z",
+        )
+        card = ReportCardPayload(
+            session_id="session-1",
+            stage_id="stage-1",
+            stage_name="drafting",
+            kind="stage_completed",
+            message="Stage completed",
+            created_at="2026-05-03T00:00:05Z",
+        )
+        launch = ReportSessionLaunchRequest(session_id=None, thread_id=None)
+
+        assert session.metadata == {}
+        assert gate.question == {}
+        assert gate.answer == {}
+        assert log.payload == {}
+        assert finding.payload == {}
+        assert export.diagnostics == {}
+        assert card.payload == {}
+        assert launch.session_id is None
+        assert launch.thread_id is None
+        assert launch.metadata == {}
+
+    @pytest.mark.parametrize(
+        "kind",
+        [
+            "stage_started",
+            "stage_completed",
+            "stage_failed",
+            "gate_opened",
+            "gate_closed",
+            "failure",
+        ],
+    )
+    def test_report_card_accepts_all_kinds(self, kind: str) -> None:
+        card = ReportCardPayload(
+            session_id="session-1",
+            stage_id="stage-1",
+            stage_name="drafting",
+            kind=kind,
+            message="Stage event",
+            created_at="2026-05-03T00:00:05Z",
+            payload={"kind": kind},
+        )
+
+        assert card.kind == kind
+        assert ReportCardPayload.model_validate(card.model_dump()) == card
+
+    def test_report_session_launch_request_accepts_none_ids(self) -> None:
+        request = ReportSessionLaunchRequest(
+            session_id=None,
+            thread_id=None,
+            metadata={"source": "chat"},
+        )
+
+        assert request.session_id is None
+        assert request.thread_id is None
+        assert request.metadata == {"source": "chat"}
+        assert ReportSessionLaunchRequest.model_validate(request.model_dump()) == request
+
+    def test_report_gate_answer_rejects_non_dict_answer(self) -> None:
+        with pytest.raises(ValidationError):
+            ReportGateAnswerRequest(answer="approved")  # type: ignore[arg-type]

@@ -189,6 +189,19 @@ class DocumentRegistry:
             ).fetchone()
         return _row_to_record(row) if row is not None else None
 
+    def list_all(self) -> Sequence[DocumentRecord]:
+        """Return every registry row in deterministic upload order."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT document_id, content_hash, original_filename, stored_path,
+                       content_type, byte_size, uploaded_at, status, error, memory_ids
+                FROM documents
+                ORDER BY uploaded_at ASC, document_id ASC
+                """,
+            ).fetchall()
+        return [_row_to_record(row) for row in rows]
+
     def close(self) -> None:
         """Close the underlying SQLite connection."""
         with self._lock:
