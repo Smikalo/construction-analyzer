@@ -233,7 +233,11 @@ class ReportPipeline:
         inventory: dict[str, Any] = {}
         manifest_sections: list[dict[str, Any]] = []
         try:
-            closed_gate = self._store.close_gate(gate.gate_id, answer=answer)
+            closed_gate = self._store.close_gate(
+                gate.gate_id,
+                answer=answer,
+                session_id=normalized_session_id,
+            )
             self._append_log(
                 normalized_session_id,
                 level="info",
@@ -747,7 +751,11 @@ class ReportPipeline:
             raise ValueError(f"invalid gate choice: {choice}")
 
         try:
-            closed_gate = self._store.close_gate(gate.gate_id, answer=answer)
+            closed_gate = self._store.close_gate(
+                gate.gate_id,
+                answer=answer,
+                session_id=session_id,
+            )
             self._append_log(
                 session_id,
                 level="info",

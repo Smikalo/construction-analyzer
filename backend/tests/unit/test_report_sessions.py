@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from app.services.report_sessions import lifespan_report_sessions
+from app.services.report_sessions import ReportSessionStore, lifespan_report_sessions
 
 
 class TestReportSessionStore:
@@ -123,6 +123,112 @@ class TestReportSessionStore:
             assert [gate.gate_id for gate in gates] == [open_gate.gate_id, closed_gate.gate_id]
             assert gates[0].status == "open"
             assert gates[1].status == "closed"
+
+    async def test_fixed_gate_ids_are_scoped_per_session(self) -> None:
+        async with lifespan_report_sessions(":memory:") as store:
+            store.create_session(session_id="session-1")
+            store.create_session(session_id="session-2")
+            stage_1 = store.start_stage("session-1", "bootstrap")
+            stage_2 = store.start_stage("session-2", "bootstrap")
+
+            store.open_gate(
+                "session-1",
+                stage_id=stage_1.stage_id,
+                gate_id="report_template_confirmation",
+                question={"prompt": "Confirm template"},
+            )
+            store.open_gate(
+                "session-2",
+                stage_id=stage_2.stage_id,
+                gate_id="report_template_confirmation",
+                question={"prompt": "Confirm template"},
+            )
+
+            closed = store.close_gate(
+                "report_template_confirmation",
+                session_id="session-2",
+                answer={"choice": "cancel"},
+            )
+
+            assert closed.session_id == "session-2"
+            assert store.list_gates("session-1")[0].status == "open"
+            assert store.list_gates("session-2")[0].status == "closed"
+            with pytest.raises(ValueError, match="provide session_id"):
+                store.close_gate("report_template_confirmation", answer={"choice": "cancel"})
+
+    async def test_legacy_gate_schema_migrates_to_session_scoped_gate_ids(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE report_sessions (
+                session_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                current_stage TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT,
+                last_error TEXT,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE report_stages (
+                stage_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES report_sessions(session_id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                summary TEXT,
+                error TEXT
+            );
+            CREATE TABLE report_gates (
+                gate_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES report_sessions(session_id) ON DELETE CASCADE,
+                stage_id TEXT REFERENCES report_stages(stage_id) ON DELETE SET NULL,
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                closed_at TEXT
+            );
+            INSERT INTO report_sessions (
+                session_id, status, current_stage, created_at, updated_at, metadata
+            ) VALUES (
+                'session-1',
+                'blocked',
+                'bootstrap',
+                '2026-05-03T00:00:00Z',
+                '2026-05-03T00:00:00Z',
+                '{}'
+            );
+            INSERT INTO report_stages (
+                stage_id, session_id, name, status, started_at
+            ) VALUES ('stage-1', 'session-1', 'bootstrap', 'complete', '2026-05-03T00:00:00Z');
+            INSERT INTO report_gates (
+                gate_id, session_id, stage_id, question, status, created_at
+            ) VALUES (
+                'report_template_confirmation',
+                'session-1',
+                'stage-1',
+                '{}',
+                'open',
+                '2026-05-03T00:00:00Z'
+            );
+            """
+        )
+
+        store = ReportSessionStore(conn)
+        store.create_session(session_id="session-2")
+        stage_2 = store.start_stage("session-2", "bootstrap")
+        gate_2 = store.open_gate(
+            "session-2",
+            stage_id=stage_2.stage_id,
+            gate_id="report_template_confirmation",
+            question={"prompt": "Confirm template"},
+        )
+
+        assert store.list_gates("session-1")[0].gate_id == gate_2.gate_id
+        assert store.list_gates("session-2") == [gate_2]
+        store.close()
 
     async def test_artifact_round_trip_and_listing_is_ordered_by_created_at(self) -> None:
         async with lifespan_report_sessions(":memory:") as store:

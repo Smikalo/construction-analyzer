@@ -424,9 +424,9 @@ class ReportSessionStore:
                     SELECT gate_id, session_id, stage_id, question, answer, status,
                            created_at, closed_at
                     FROM report_gates
-                    WHERE gate_id = ?
+                    WHERE session_id = ? AND gate_id = ?
                     """,
-                    (candidate_id,),
+                    (session_id, candidate_id),
                 ).fetchone()
 
         if row is None:
@@ -439,6 +439,7 @@ class ReportSessionStore:
         *,
         answer: dict[str, Any],
         closed_at: str | None = None,
+        session_id: str | None = None,
     ) -> ReportGateRecord:
         """Close a gate by persisting the answer payload."""
         timestamp = closed_at or _now_iso()
@@ -446,13 +447,14 @@ class ReportSessionStore:
 
         with self._lock:
             with self._conn:
+                target_session_id = self._resolve_gate_session_id(gate_id, session_id=session_id)
                 cursor = self._conn.execute(
                     """
                     UPDATE report_gates
                     SET status = 'closed', answer = ?, closed_at = ?
-                    WHERE gate_id = ?
+                    WHERE session_id = ? AND gate_id = ?
                     """,
-                    (answer_json, timestamp, gate_id),
+                    (answer_json, timestamp, target_session_id, gate_id),
                 )
                 if cursor.rowcount == 0:
                     raise KeyError(gate_id)
@@ -461,14 +463,45 @@ class ReportSessionStore:
                     SELECT gate_id, session_id, stage_id, question, answer, status,
                            created_at, closed_at
                     FROM report_gates
-                    WHERE gate_id = ?
+                    WHERE session_id = ? AND gate_id = ?
                     """,
-                    (gate_id,),
+                    (target_session_id, gate_id),
                 ).fetchone()
 
         if row is None:
             raise KeyError(gate_id)
         return _row_to_gate_record(row)
+
+    def _resolve_gate_session_id(self, gate_id: str, *, session_id: str | None) -> str:
+        """Resolve the owning session for a gate id, preserving legacy single-id callers."""
+        if session_id is not None:
+            row = self._conn.execute(
+                """
+                SELECT session_id
+                FROM report_gates
+                WHERE session_id = ? AND gate_id = ?
+                """,
+                (session_id, gate_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(gate_id)
+            return str(row["session_id"])
+
+        rows = self._conn.execute(
+            """
+            SELECT session_id
+            FROM report_gates
+            WHERE gate_id = ?
+            ORDER BY created_at, session_id
+            LIMIT 2
+            """,
+            (gate_id,),
+        ).fetchall()
+        if not rows:
+            raise KeyError(gate_id)
+        if len(rows) > 1:
+            raise ValueError("gate_id matches multiple sessions; provide session_id")
+        return str(rows[0]["session_id"])
 
     def list_gates(self, session_id: str) -> list[ReportGateRecord]:
         """Return all gates for a session ordered by creation time."""
@@ -850,7 +883,7 @@ class ReportSessionStore:
                 self._conn.execute(
                     f"""
                     CREATE TABLE IF NOT EXISTS report_gates (
-                        gate_id TEXT PRIMARY KEY,
+                        gate_id TEXT NOT NULL,
                         session_id TEXT NOT NULL
                             REFERENCES report_sessions(session_id)
                             ON DELETE CASCADE,
@@ -861,7 +894,8 @@ class ReportSessionStore:
                         answer TEXT NOT NULL DEFAULT '{{}}',
                         status TEXT NOT NULL CHECK (status IN ({allowed_gate_statuses})),
                         created_at TEXT NOT NULL,
-                        closed_at TEXT
+                        closed_at TEXT,
+                        PRIMARY KEY (session_id, gate_id)
                     )
                     """
                 )
@@ -930,6 +964,7 @@ class ReportSessionStore:
                     )
                     """
                 )
+                self._ensure_report_gates_session_scoped(allowed_gate_statuses)
                 self._conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_report_stages_session_id
@@ -966,6 +1001,61 @@ class ReportSessionStore:
                     ON report_exports(session_id)
                     """
                 )
+
+    def _ensure_report_gates_session_scoped(self, allowed_gate_statuses: str) -> None:
+        """Migrate fixed gate ids from global uniqueness to per-session uniqueness."""
+        columns = self._conn.execute("PRAGMA table_info(report_gates)").fetchall()
+        primary_key_columns = [
+            row["name"] for row in sorted(columns, key=lambda row: row["pk"]) if row["pk"]
+        ]
+        if primary_key_columns == ["session_id", "gate_id"]:
+            return
+
+        self._conn.execute(
+            f"""
+            CREATE TABLE report_gates_session_scoped (
+                gate_id TEXT NOT NULL,
+                session_id TEXT NOT NULL
+                    REFERENCES report_sessions(session_id)
+                    ON DELETE CASCADE,
+                stage_id TEXT
+                    REFERENCES report_stages(stage_id)
+                    ON DELETE SET NULL,
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL DEFAULT '{{}}',
+                status TEXT NOT NULL CHECK (status IN ({allowed_gate_statuses})),
+                created_at TEXT NOT NULL,
+                closed_at TEXT,
+                PRIMARY KEY (session_id, gate_id)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            INSERT INTO report_gates_session_scoped (
+                gate_id,
+                session_id,
+                stage_id,
+                question,
+                answer,
+                status,
+                created_at,
+                closed_at
+            )
+            SELECT
+                gate_id,
+                session_id,
+                stage_id,
+                question,
+                answer,
+                status,
+                created_at,
+                closed_at
+            FROM report_gates
+            """
+        )
+        self._conn.execute("DROP TABLE report_gates")
+        self._conn.execute("ALTER TABLE report_gates_session_scoped RENAME TO report_gates")
 
     def _require_session(self, session_id: str) -> sqlite3.Row:
         row = self._conn.execute(
