@@ -39,6 +39,7 @@ class AppState:
     registry: DocumentRegistry
     report_sessions: ReportSessionStore
     pipeline_registry: ReportPipelineRegistry
+    report_exports_dir: str
     graph: Any  # CompiledStateGraph; not exposed in stable types
     document_analyzer: DocumentAnalyzer | None = None
     engineering_converter: EngineeringConverter | None = None
@@ -58,6 +59,7 @@ def build_app_state(
     document_analyzer: DocumentAnalyzer | None = None,
     engineering_converter: EngineeringConverter | None = None,
     engineering_converter_output_dir: str | None = None,
+    report_exports_dir: str | None = None,
 ) -> AppState:
     active_settings = settings or get_settings()
     active_engineering_converter = engineering_converter or get_engineering_converter(
@@ -76,6 +78,11 @@ def build_app_state(
         registry=registry,
         report_sessions=report_sessions,
         pipeline_registry=pipeline_registry,
+        report_exports_dir=(
+            report_exports_dir
+            if report_exports_dir is not None
+            else active_settings.report_exports_dir
+        ),
         graph=graph,
         document_analyzer=document_analyzer,
         engineering_converter=active_engineering_converter,
@@ -126,6 +133,7 @@ async def _production_lifespan(app: FastAPI) -> AsyncIterator[None]:
                     document_analyzer=document_analyzer,
                     engineering_converter=engineering_converter,
                     engineering_converter_output_dir=settings.engineering_converter_output_dir,
+                    report_exports_dir=settings.report_exports_dir,
                 )
                 yield
 

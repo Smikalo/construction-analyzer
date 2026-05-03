@@ -59,6 +59,7 @@ async def launch_report_session(
         state.registry,
         state.kb,
         lambda: state.llm,
+        report_exports_dir=state.report_exports_dir,
     )
     resumed = state.report_sessions.get_session(session_id) is not None
 
@@ -137,6 +138,7 @@ async def answer_report_gate(
         state.registry,
         state.kb,
         lambda: state.llm,
+        report_exports_dir=state.report_exports_dir,
     )
     try:
         await pipeline.answer_gate(session_id, req.answer, gate_id=gate.gate_id)
@@ -193,6 +195,8 @@ def _build_pipeline(
     document_registry: DocumentRegistry,
     kb: KnowledgeBase,
     llm_factory: Callable[[], BaseChatModel],
+    *,
+    report_exports_dir: str,
 ) -> ReportPipeline:
     """Build a report pipeline for the current app state."""
     return ReportPipeline(
@@ -201,6 +205,7 @@ def _build_pipeline(
         kb=kb,
         llm_factory=llm_factory,
         registry_pipeline=registry,
+        report_exports_dir=report_exports_dir,
     )
 
 

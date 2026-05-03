@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -98,6 +99,22 @@ async def _seed_recalled_memory(kb) -> str:
         metadata={
             "document_id": "doc-hit",
             "source": "report.pdf",
+        },
+    )
+
+
+async def _seed_uncertainty_memory(kb) -> str:
+    provenance_header = "[source=uncertainty.pdf; page=7; element=paragraph; extraction=text]"
+    memory_content = (
+        f"{provenance_header}\n"
+        "Texte Unterlagen Unsicherheiten, Widersprueche und fehlende Nachweise "
+        "— fehlende Nachweise bleiben als Unsicherheit sichtbar."
+    )
+    return await kb.remember(
+        memory_content,
+        metadata={
+            "document_id": "doc-uncertainty",
+            "source": "uncertainty.pdf",
         },
     )
 
@@ -227,8 +244,8 @@ class TestReportGateAnswer:
         store = client.app.state.app_state.report_sessions
         session = store.get_session(session_id)
         assert session is not None
-        assert session.status == "active"
-        assert session.current_stage == "draft_report_sections"
+        assert session.status == "blocked"
+        assert session.current_stage == "validate_report"
 
         stages = store.list_stages(session_id)
         assert [stage.name for stage in stages] == [
@@ -237,10 +254,19 @@ class TestReportGateAnswer:
             "plan_report_sections",
             "retrieve_section_evidence",
             "draft_report_sections",
+            "validate_report",
         ]
+        assert stages[-1].status == "complete"
         gates = store.list_gates(session_id)
         assert gates[0].status == "closed"
         assert gates[0].answer == {"choice": "general_project_dossier"}
+        assert gates[1].gate_id == "report_validation_export_confirmation"
+        assert gates[1].status == "open"
+        assert [finding.code for finding in store.list_validation_findings(session_id)] == [
+            "appendix_source_inventory_consistent",
+            "mandatory_uncertainty_missing",
+        ]
+        assert store.list_exports(session_id) == []
 
     async def test_general_project_dossier_persists_inventory_and_section_plan_in_inspection(
         self,
@@ -264,16 +290,17 @@ class TestReportGateAnswer:
         assert inspection.status_code == 200
 
         body = inspection.json()
-        assert body["current_stage"] == "draft_report_sections"
-        assert body["session"]["status"] == "active"
+        assert body["current_stage"] == "validate_report"
+        assert body["session"]["status"] == "blocked"
         assert [stage["name"] for stage in body["stages"]] == [
             "bootstrap",
             "inventory_sources",
             "plan_report_sections",
             "retrieve_section_evidence",
             "draft_report_sections",
+            "validate_report",
         ]
-        assert len(body["stages"]) == 5
+        assert len(body["stages"]) == 6
         assert body["artifacts"][0]["content"]["totals"] == {
             "indexed": 1,
             "skipped": 1,
@@ -296,6 +323,15 @@ class TestReportGateAnswer:
         assert retrieval_artifact["content"]["kind"] == "retrieval_manifest"
         assert len(paragraph_artifacts) == active_section_count
         assert all(artifact["content"]["no_evidence"] is True for artifact in paragraph_artifacts)
+        assert body["validation_findings"]
+        assert any(
+            finding["severity"] == "blocker"
+            and finding["code"] == "failed_skipped_source_not_visible"
+            for finding in body["validation_findings"]
+        )
+        assert body["exports"] == []
+        assert body["gates"][-1]["gate_id"] == "report_validation_export_confirmation"
+        assert body["gates"][-1]["status"] == "open"
 
     async def test_general_project_dossier_run_produces_paragraph_citations(
         self,
@@ -354,10 +390,11 @@ class TestReportGateAnswer:
             if section["total_hit_count"] > 0
         ]
 
-        assert body["session"]["status"] == "active"
-        assert body["current_stage"] == "draft_report_sections"
+        assert body["session"]["status"] == "blocked"
+        assert body["current_stage"] == "validate_report"
         assert stage_statuses["retrieve_section_evidence"] == "complete"
         assert stage_statuses["draft_report_sections"] == "complete"
+        assert stage_statuses["validate_report"] == "complete"
         assert retrieval_manifest["content"]["kind"] == "retrieval_manifest"
         assert hit_section_ids == ["aufgabenstellung"]
         assert retrieval_section["total_hit_count"] == 1
@@ -370,6 +407,11 @@ class TestReportGateAnswer:
                 "provenance": "[source=report.pdf; page=2; element=paragraph; extraction=text]",
             }
         ]
+        assert any(
+            finding["code"] == "mandatory_uncertainty_missing"
+            for finding in body["validation_findings"]
+        )
+        assert body["exports"] == []
         assert llm.call_count == 1
 
     async def test_general_project_dossier_run_marks_zero_evidence_sections(
@@ -405,10 +447,11 @@ class TestReportGateAnswer:
         warning_logs = [log for log in body["recent_logs"] if log["level"] == "warning"]
         stage_statuses = {stage["name"]: stage["status"] for stage in body["stages"]}
 
-        assert body["session"]["status"] == "active"
-        assert body["current_stage"] == "draft_report_sections"
+        assert body["session"]["status"] == "blocked"
+        assert body["current_stage"] == "validate_report"
         assert stage_statuses["retrieve_section_evidence"] == "complete"
         assert stage_statuses["draft_report_sections"] == "complete"
+        assert stage_statuses["validate_report"] == "complete"
         assert len(paragraph_artifacts) == len(active_section_ids)
         assert sorted(
             artifact["content"]["section_id"] for artifact in paragraph_artifacts
@@ -419,7 +462,121 @@ class TestReportGateAnswer:
             log["message"].startswith("Section ") and "drafted with no evidence" in log["message"]
             for log in warning_logs
         )
+        assert any(
+            finding["code"] == "mandatory_uncertainty_missing"
+            for finding in body["validation_findings"]
+        )
+        assert body["exports"] == []
         assert llm.call_count == 0
+
+    async def test_clean_general_project_dossier_exports_pdf_in_inspection(
+        self,
+        client: TestClient,
+    ) -> None:
+        memory_id = await _seed_uncertainty_memory(client.app.state.app_state.kb)
+        payload = json.dumps(
+            {
+                "paragraphs": [
+                    {
+                        "text": (
+                            "Unsicherheiten werden als interner Prüfpunkt benannt. "
+                            f"[evidence_id={memory_id}]"
+                        ),
+                        "evidence_ids": [memory_id],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+        llm = make_fake_chat_model([payload])
+        client.app.state.app_state.llm = llm
+
+        launch = client.post("/api/reports", json={})
+        session_id = launch.json()["session_id"]
+        gate_id = client.app.state.app_state.report_sessions.list_gates(session_id)[0].gate_id
+
+        answer = client.post(
+            f"/api/reports/{session_id}/gates/{gate_id}/answer",
+            json={"answer": {"choice": "general_project_dossier"}},
+        )
+        assert answer.status_code == 204
+
+        inspection = client.get(f"/api/reports/{session_id}")
+        assert inspection.status_code == 200
+
+        body = inspection.json()
+        export = body["exports"][0]
+        pdf_artifact = next(
+            artifact for artifact in body["artifacts"] if artifact["kind"] == "pdf_export"
+        )
+        stage_statuses = {stage["name"]: stage["status"] for stage in body["stages"]}
+        log_messages = [log["message"] for log in body["recent_logs"]]
+
+        assert body["session"]["status"] == "complete"
+        assert body["current_stage"] == "export_report"
+        assert stage_statuses["validate_report"] == "complete"
+        assert stage_statuses["export_report"] == "complete"
+        assert [finding["severity"] for finding in body["validation_findings"]] == ["info"]
+        assert export["status"] == "ready"
+        assert export["format"] == "pdf"
+        assert export["output_path"] is not None
+        assert Path(export["output_path"]).read_bytes().startswith(b"%PDF")
+        assert export["diagnostics"]["validation_blocker_count"] == 0
+        assert export["diagnostics"]["blockers_overridden"] is False
+        assert pdf_artifact["content"]["status"] == "ready"
+        assert pdf_artifact["content"]["diagnostics"]["format"] == "pdf"
+        assert "Report validation stage completed" in log_messages
+        assert "Report PDF export ready" in log_messages
+        assert llm.call_count == 1
+
+    async def test_validation_gate_rejects_invalid_choice_then_exports_with_override(
+        self,
+        client: TestClient,
+    ) -> None:
+        launch = client.post("/api/reports", json={})
+        session_id = launch.json()["session_id"]
+        bootstrap_gate_id = client.app.state.app_state.report_sessions.list_gates(session_id)[
+            0
+        ].gate_id
+        _set_empty_report_draft_llm(client)
+
+        first = client.post(
+            f"/api/reports/{session_id}/gates/{bootstrap_gate_id}/answer",
+            json={"answer": {"choice": "general_project_dossier"}},
+        )
+        assert first.status_code == 204
+
+        validation_gate = client.app.state.app_state.report_sessions.list_gates(session_id)[-1]
+        invalid = client.post(
+            f"/api/reports/{session_id}/gates/{validation_gate.gate_id}/answer",
+            json={"answer": {"choice": "unsupported"}},
+        )
+        assert invalid.status_code == 422
+        gates = client.app.state.app_state.report_sessions.list_gates(session_id)
+        assert gates[-1].status == "open"
+        assert client.app.state.app_state.report_sessions.list_exports(session_id) == []
+
+        proceed = client.post(
+            f"/api/reports/{session_id}/gates/{validation_gate.gate_id}/answer",
+            json={"answer": {"choice": "proceed_with_blockers"}},
+        )
+        assert proceed.status_code == 204
+
+        inspection = client.get(f"/api/reports/{session_id}")
+        body = inspection.json()
+        export = body["exports"][0]
+
+        assert body["session"]["status"] == "complete"
+        assert body["current_stage"] == "export_report"
+        assert body["gates"][-1]["status"] == "closed"
+        assert body["gates"][-1]["answer"] == {"choice": "proceed_with_blockers"}
+        assert export["status"] == "ready"
+        assert export["diagnostics"]["blockers_overridden"] is True
+        assert export["diagnostics"]["validation_blocker_count"] >= 1
+        assert export["diagnostics"]["validation_gate_id"] == (
+            "report_validation_export_confirmation"
+        )
+        assert Path(export["output_path"]).exists()
 
     async def test_double_answering_closed_gate_returns_409(self, client: TestClient) -> None:
         launch = client.post("/api/reports", json={})

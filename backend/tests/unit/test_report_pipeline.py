@@ -6,6 +6,8 @@ import asyncio
 import json
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 from langchain_core.language_models import BaseChatModel
@@ -15,10 +17,13 @@ from app.services.document_registry import lifespan_document_registry
 from app.services.report_pipeline import (
     BOOTSTRAP_STAGE_NAME,
     DRAFT_REPORT_SECTIONS_STAGE_NAME,
+    EXPORT_REPORT_STAGE_NAME,
     INVENTORY_SOURCES_STAGE_NAME,
     PLAN_REPORT_SECTIONS_STAGE_NAME,
     REPORT_TEMPLATE_CONFIRMATION_GATE_ID,
+    REPORT_VALIDATION_EXPORT_GATE_ID,
     RETRIEVE_SECTION_EVIDENCE_STAGE_NAME,
+    VALIDATE_REPORT_STAGE_NAME,
     ReportPipeline,
     ReportPipelineRegistry,
 )
@@ -42,17 +47,19 @@ async def _pipeline_context(
     active_llm_factory = llm_factory or (lambda: make_fake_chat_model([EMPTY_DRAFT_PAYLOAD]))
     async with lifespan_report_sessions(":memory:") as store:
         async with lifespan_document_registry(":memory:") as document_registry:
-            yield (
-                store,
-                document_registry,
-                ReportPipeline(
+            with TemporaryDirectory(prefix="report-exports-") as export_dir:
+                yield (
                     store,
                     document_registry,
-                    kb=active_kb,
-                    llm_factory=active_llm_factory,
-                    registry_pipeline=ReportPipelineRegistry(),
-                ),
-            )
+                    ReportPipeline(
+                        store,
+                        document_registry,
+                        kb=active_kb,
+                        llm_factory=active_llm_factory,
+                        registry_pipeline=ReportPipelineRegistry(),
+                        report_exports_dir=export_dir,
+                    ),
+                )
 
 
 def _seed_report_documents(registry) -> None:
@@ -128,8 +135,8 @@ class TestReportPipeline:
             )
             chunks = _drain_queue(pipeline.events("session-1"))
 
-            assert session.status == "active"
-            assert session.current_stage == DRAFT_REPORT_SECTIONS_STAGE_NAME
+            assert session.status == "blocked"
+            assert session.current_stage == VALIDATE_REPORT_STAGE_NAME
             assert [chunk.type for chunk in chunks] == [
                 "report_card",
                 "report_card",
@@ -140,9 +147,14 @@ class TestReportPipeline:
                 "report_card",
                 "report_card",
                 "report_card",
+                "report_card",
+                "report_card",
+                "report_gate",
             ]
-            assert [chunk.payload["kind"] for chunk in chunks] == [
+            assert [chunk.payload["kind"] for chunk in chunks if chunk.type == "report_card"] == [
                 "gate_closed",
+                "stage_started",
+                "stage_completed",
                 "stage_started",
                 "stage_completed",
                 "stage_started",
@@ -160,12 +172,15 @@ class TestReportPipeline:
             assert chunks[3].payload["stage_name"] == PLAN_REPORT_SECTIONS_STAGE_NAME
             assert chunks[5].payload["stage_name"] == RETRIEVE_SECTION_EVIDENCE_STAGE_NAME
             assert chunks[7].payload["stage_name"] == DRAFT_REPORT_SECTIONS_STAGE_NAME
+            assert chunks[9].payload["stage_name"] == VALIDATE_REPORT_STAGE_NAME
+            assert chunks[11].payload["gate_id"] == REPORT_VALIDATION_EXPORT_GATE_ID
             assert [stage.name for stage in store.list_stages("session-1")] == [
                 BOOTSTRAP_STAGE_NAME,
                 INVENTORY_SOURCES_STAGE_NAME,
                 PLAN_REPORT_SECTIONS_STAGE_NAME,
                 RETRIEVE_SECTION_EVIDENCE_STAGE_NAME,
                 DRAFT_REPORT_SECTIONS_STAGE_NAME,
+                VALIDATE_REPORT_STAGE_NAME,
             ]
             assert [stage.status for stage in store.list_stages("session-1")] == [
                 "complete",
@@ -173,7 +188,15 @@ class TestReportPipeline:
                 "complete",
                 "complete",
                 "complete",
+                "complete",
             ]
+            assert store.list_gates("session-1")[-1].gate_id == REPORT_VALIDATION_EXPORT_GATE_ID
+            assert store.list_gates("session-1")[-1].status == "open"
+            assert [finding.code for finding in store.list_validation_findings("session-1")] == [
+                "appendix_source_inventory_consistent",
+                "mandatory_uncertainty_missing",
+            ]
+            assert store.list_exports("session-1") == []
 
             logs = store.list_logs("session-1")
             lifecycle_messages = [
@@ -189,6 +212,8 @@ class TestReportPipeline:
                     "Section evidence retrieval completed",
                     "Report section drafting started",
                     "Report section drafting completed",
+                    "Report validation stage started",
+                    "Report validation stage completed",
                 }
             ]
             assert lifecycle_messages == [
@@ -200,6 +225,8 @@ class TestReportPipeline:
                 "Section evidence retrieval completed",
                 "Report section drafting started",
                 "Report section drafting completed",
+                "Report validation stage started",
+                "Report validation stage completed",
             ]
             assert next(
                 log for log in logs if log.message == "Source inventory snapshot recorded"
@@ -275,14 +302,15 @@ class TestReportPipeline:
                 1 for section in section_plan_artifact.content["sections"] if section["active"]
             )
 
-            assert session.status == "active"
-            assert session.current_stage == DRAFT_REPORT_SECTIONS_STAGE_NAME
+            assert session.status == "blocked"
+            assert session.current_stage == VALIDATE_REPORT_STAGE_NAME
             assert [
                 artifact.kind for artifact in artifacts if artifact.kind != "paragraph_citations"
             ] == [
                 "source_inventory_snapshot",
                 "section_plan",
                 "other",
+                "validation_finding",
             ]
             assert artifacts[0].content["totals"] == {
                 "indexed": 1,
@@ -332,8 +360,8 @@ class TestReportPipeline:
                 section["id"] for section in retrieval_artifact.content["sections"]
             ]
 
-            assert session.status == "active"
-            assert session.current_stage == DRAFT_REPORT_SECTIONS_STAGE_NAME
+            assert session.status == "blocked"
+            assert session.current_stage == VALIDATE_REPORT_STAGE_NAME
             assert llm.call_count == 1
             assert len(retrieval_artifacts) == 1
             assert retrieval_artifact.content["kind"] == "retrieval_manifest"
@@ -377,8 +405,8 @@ class TestReportPipeline:
                 if artifact.kind == "paragraph_citations" and not artifact.content["no_evidence"]
             ]
 
-            assert session.status == "active"
-            assert session.current_stage == DRAFT_REPORT_SECTIONS_STAGE_NAME
+            assert session.status == "blocked"
+            assert session.current_stage == VALIDATE_REPORT_STAGE_NAME
             assert llm.call_count == 1
             assert len(paragraph_artifacts) == 1
             expected_provenance = "[source=report.pdf; page=2; element=paragraph; extraction=text]"
@@ -431,14 +459,233 @@ class TestReportPipeline:
                 if log.level == "warning" and log.message.endswith("drafted with no evidence")
             ]
 
-            assert session.status == "active"
-            assert session.current_stage == DRAFT_REPORT_SECTIONS_STAGE_NAME
+            assert session.status == "blocked"
+            assert session.current_stage == VALIDATE_REPORT_STAGE_NAME
             assert llm.call_count == 0
             assert len(paragraph_artifacts) == active_section_count
             assert all(artifact.content["no_evidence"] is True for artifact in paragraph_artifacts)
             assert all(artifact.content["paragraph_index"] == 0 for artifact in paragraph_artifacts)
             assert len(warning_logs) == active_section_count
             assert all(log.payload["no_evidence"] is True for log in warning_logs)
+
+    async def test_clean_validation_exports_ready_pdf(self) -> None:
+        kb = FakeKB()
+        memory_id, _section = await _seed_recalled_memory(kb, "unsicherheiten")
+        payload = json.dumps(
+            {
+                "paragraphs": [
+                    {
+                        "text": (
+                            "Die Unsicherheiten bleiben als interner Prüfpunkt sichtbar. "
+                            f"[evidence_id={memory_id}]"
+                        ),
+                        "evidence_ids": [memory_id],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+        llm = make_fake_chat_model([payload])
+
+        async with _pipeline_context(kb=kb, llm_factory=lambda: llm) as (
+            store,
+            _document_registry,
+            pipeline,
+        ):
+            await pipeline.start("session-clean")
+            _drain_queue(pipeline.events("session-clean"))
+
+            session = await pipeline.answer_gate(
+                "session-clean",
+                {"choice": "general_project_dossier"},
+            )
+            chunks = _drain_queue(pipeline.events("session-clean"))
+
+            exports = store.list_exports("session-clean")
+            export = exports[0]
+            artifacts = store.list_artifacts("session-clean")
+            pdf_artifact = next(artifact for artifact in artifacts if artifact.kind == "pdf_export")
+
+            assert session.status == "complete"
+            assert session.current_stage == EXPORT_REPORT_STAGE_NAME
+            assert [stage.name for stage in store.list_stages("session-clean")][-2:] == [
+                VALIDATE_REPORT_STAGE_NAME,
+                EXPORT_REPORT_STAGE_NAME,
+            ]
+            assert [stage.status for stage in store.list_stages("session-clean")][-2:] == [
+                "complete",
+                "complete",
+            ]
+            finding_severities = [
+                finding.severity for finding in store.list_validation_findings("session-clean")
+            ]
+            assert finding_severities == ["info"]
+            assert len(exports) == 1
+            assert export.status == "ready"
+            assert export.format == "pdf"
+            assert export.output_path is not None
+            assert Path(export.output_path).read_bytes().startswith(b"%PDF")
+            assert export.diagnostics["validation_blocker_count"] == 0
+            assert export.diagnostics["blockers_overridden"] is False
+            assert pdf_artifact.content["status"] == "ready"
+            assert pdf_artifact.content["diagnostics"]["output_filename"].endswith("-report.pdf")
+            report_card_stage_names = [
+                chunk.payload.get("stage_name")
+                for chunk in chunks
+                if chunk.type == "report_card"
+            ]
+            assert report_card_stage_names[-2:] == [
+                EXPORT_REPORT_STAGE_NAME,
+                EXPORT_REPORT_STAGE_NAME,
+            ]
+            assert all(chunk.type != "report_gate" for chunk in chunks)
+
+    async def test_blocker_validation_gate_can_export_with_override(self) -> None:
+        async with _pipeline_context() as (store, _document_registry, pipeline):
+            await pipeline.start("session-override")
+            _drain_queue(pipeline.events("session-override"))
+            blocked = await pipeline.answer_gate(
+                "session-override",
+                {"choice": "general_project_dossier"},
+            )
+            _drain_queue(pipeline.events("session-override"))
+            validation_gate = store.list_gates("session-override")[-1]
+
+            session = await pipeline.answer_gate(
+                "session-override",
+                {"choice": "proceed_with_blockers"},
+                gate_id=validation_gate.gate_id,
+            )
+            chunks = _drain_queue(pipeline.events("session-override"))
+            export = store.list_exports("session-override")[0]
+
+            assert blocked.status == "blocked"
+            assert validation_gate.gate_id == REPORT_VALIDATION_EXPORT_GATE_ID
+            assert session.status == "complete"
+            assert session.current_stage == EXPORT_REPORT_STAGE_NAME
+            assert store.list_gates("session-override")[-1].status == "closed"
+            assert export.status == "ready"
+            assert export.diagnostics["blockers_overridden"] is True
+            assert export.diagnostics["validation_blocker_count"] >= 1
+            assert export.diagnostics["validation_gate_id"] == REPORT_VALIDATION_EXPORT_GATE_ID
+            assert Path(export.output_path or "").exists()
+            assert [chunk.payload["kind"] for chunk in chunks if chunk.type == "report_card"] == [
+                "gate_closed",
+                "stage_started",
+                "stage_completed",
+            ]
+
+    async def test_invalid_validation_gate_choice_leaves_state_unchanged(self) -> None:
+        async with _pipeline_context() as (store, _document_registry, pipeline):
+            await pipeline.start("session-invalid-choice")
+            _drain_queue(pipeline.events("session-invalid-choice"))
+            await pipeline.answer_gate(
+                "session-invalid-choice",
+                {"choice": "general_project_dossier"},
+            )
+            _drain_queue(pipeline.events("session-invalid-choice"))
+            validation_gate = store.list_gates("session-invalid-choice")[-1]
+
+            with pytest.raises(ValueError, match="invalid gate choice"):
+                await pipeline.answer_gate(
+                    "session-invalid-choice",
+                    {"choice": "unsupported"},
+                    gate_id=validation_gate.gate_id,
+                )
+
+            session = store.get_session("session-invalid-choice")
+            assert session is not None
+            assert session.status == "blocked"
+            assert store.list_gates("session-invalid-choice")[-1].status == "open"
+            assert store.list_exports("session-invalid-choice") == []
+            assert _drain_queue(pipeline.events("session-invalid-choice")) == []
+
+    async def test_validation_gate_cancel_completes_without_export(self) -> None:
+        async with _pipeline_context() as (store, _document_registry, pipeline):
+            await pipeline.start("session-cancel-export")
+            _drain_queue(pipeline.events("session-cancel-export"))
+            await pipeline.answer_gate(
+                "session-cancel-export",
+                {"choice": "general_project_dossier"},
+            )
+            _drain_queue(pipeline.events("session-cancel-export"))
+            validation_gate = store.list_gates("session-cancel-export")[-1]
+
+            session = await pipeline.answer_gate(
+                "session-cancel-export",
+                {"choice": "do_not_export"},
+                gate_id=validation_gate.gate_id,
+            )
+            chunks = _drain_queue(pipeline.events("session-cancel-export"))
+
+            assert session.status == "complete"
+            assert session.current_stage == VALIDATE_REPORT_STAGE_NAME
+            assert store.list_gates("session-cancel-export")[-1].status == "closed"
+            assert store.list_exports("session-cancel-export") == []
+            assert [chunk.payload["kind"] for chunk in chunks] == ["gate_closed"]
+            assert store.list_logs("session-cancel-export")[-1].message == (
+                "Report export skipped after validation blockers"
+            )
+
+    async def test_exporter_failure_marks_export_and_stage_failed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        kb = FakeKB()
+        memory_id, _section = await _seed_recalled_memory(kb, "unsicherheiten")
+        payload = json.dumps(
+            {
+                "paragraphs": [
+                    {
+                        "text": f"Unsicherheiten sind belegt. [evidence_id={memory_id}]",
+                        "evidence_ids": [memory_id],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+        llm = make_fake_chat_model([payload])
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("private paragraph body must not leak")
+
+        monkeypatch.setattr("app.services.report_exporter.export_report_pdf", boom)
+        async with _pipeline_context(kb=kb, llm_factory=lambda: llm) as (
+            store,
+            _document_registry,
+            pipeline,
+        ):
+            await pipeline.start("session-export-fails")
+            _drain_queue(pipeline.events("session-export-fails"))
+
+            with pytest.raises(RuntimeError, match="private paragraph body"):
+                await pipeline.answer_gate(
+                    "session-export-fails",
+                    {"choice": "general_project_dossier"},
+                )
+            chunks = _drain_queue(pipeline.events("session-export-fails"))
+            session = store.get_session("session-export-fails")
+            export = store.list_exports("session-export-fails")[0]
+            export_stage = store.list_stages("session-export-fails")[-1]
+
+            assert session is not None
+            assert session.status == "failed"
+            assert session.current_stage == EXPORT_REPORT_STAGE_NAME
+            assert session.last_error == "Report export failed."
+            assert export.status == "failed"
+            assert export.diagnostics == {
+                "format": "pdf",
+                "status": "failed",
+                "validation_finding_count": 1,
+                "validation_blocker_count": 0,
+                "blockers_overridden": False,
+                "error": "Report export failed.",
+            }
+            assert export_stage.name == EXPORT_REPORT_STAGE_NAME
+            assert export_stage.status == "failed"
+            assert export_stage.error == "Report export failed."
+            assert chunks[-1].payload["kind"] == "failure"
+            assert chunks[-1].payload["stage_name"] == EXPORT_REPORT_STAGE_NAME
 
     async def test_inventory_stage_failure_marks_session_failed(
         self,

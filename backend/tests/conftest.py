@@ -10,6 +10,7 @@ Most tests need:
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -48,7 +49,11 @@ def scripted_llm_factory():
 
 
 @pytest_asyncio.fixture
-async def app_with_fakes(fake_kb: FakeKB, scripted_llm_factory) -> AsyncIterator:
+async def app_with_fakes(
+    fake_kb: FakeKB,
+    scripted_llm_factory,
+    tmp_path: Path,
+) -> AsyncIterator:
     """Yield a FastAPI app preloaded with FakeKB, in-memory checkpointer, and
     a default scripted LLM that always replies with 'ok'.
 
@@ -69,6 +74,7 @@ async def app_with_fakes(fake_kb: FakeKB, scripted_llm_factory) -> AsyncIterator
                     registry=registry,
                     report_sessions=report_sessions,
                     pipeline_registry=pipeline_registry,
+                    report_exports_dir=str(tmp_path / "report-exports"),
                     graph=graph,
                 )
                 app = build_app(state=state)

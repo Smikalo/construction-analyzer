@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     documents_dir: str = "/app/data/documents"
     registry_db_path: str = "/app/data/registry.sqlite"
     report_sessions_db_path: str = "/app/data/report_sessions.sqlite"
+    report_exports_dir: str = "/app/data/exports"
     max_upload_bytes: int = 25_000_000
 
     # CAD/export conversion (optional; blank command template disables it)
