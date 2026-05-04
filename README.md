@@ -74,6 +74,78 @@ Streaming tokens and tool events return to the browser
 Thread state is checkpointed in SQLite and histories are replayed through /api/threads/{id}/history
 ```
 
+### Report Generation Pipeline
+
+The "Build Report" button kicks off a multi-stage workflow whose progress is
+streamed back to the browser over Server-Sent Events. Two human-in-the-loop
+gates (template confirmation and validation) can pause the pipeline until the
+user answers; the final PDF is produced by ReportLab and downloaded directly
+from the export endpoint.
+
+```text
+        ┌──────────────────────────────────────────────────────────────┐
+        │  User clicks "Build Report"  (ChatPanel.tsx)                 │
+        └───────────────┬──────────────────────────────────────────────┘
+                        │
+          ┌─────────────┴──────────────┐
+          v                            v
+ ┌──────────────────────┐    ┌────────────────────────────────────┐
+ │ POST /api/reports    │    │ GET  /api/reports/{id}/stream  SSE │
+ │ launch_report_session│    │ stream_report_session              │
+ └──────────┬───────────┘    └──────────────┬─────────────────────┘
+            │                               ^
+            v                               │ ReportCard / ReportGate
+ ┌──────────────────────────────────────────┴─────────────────────┐
+ │  ReportPipeline   (backend/app/services/report_pipeline.py)    │
+ │                                                                │
+ │   start() ──► [ Gate: template confirmation ]                  │
+ │                       │ answer_gate                            │
+ │                       v                                        │
+ │   ┌──────────────────────────────────────────────────────────┐ │
+ │   │ 1. Inventory   build_source_inventory()                  │ │
+ │   │ 2. Plan        build_general_project_dossier_section_…() │ │
+ │   │ 3. Retrieval   retrieve_section_evidence()               │ │
+ │   │ 4. Draft       draft_report_sections()                   │ │
+ │   │ 5. Validation  validate_report_projection()              │ │
+ │   └──────────────────────┬───────────────────────────────────┘ │
+ │                          │                                     │
+ │              blockers?   │   no blockers                       │
+ │              ┌───────────┴──────────┐                          │
+ │              v                      │                          │
+ │              | [ Gate: validation ] │                          │
+ │              │ answer_gate          │                          │
+ │              └──────────┬───────────┘                          │
+ │                         v                                      │
+ │   6. Export   report_exporter.export_report_pdf()              │
+ │                 │  (ReportLab → A4 PDF, atomic move)           │
+ │                 v                                              │
+ │   /app/data/exports/{session_id}-report.pdf                    │
+ │                 │                                              │
+ │                 v                                              │
+ │   export.status = ready  •  session = complete  ── done ──┐    │
+ └───────────────────────────────────────────────────────────┼────┘
+                                                             │
+                                                             v
+                                       ┌────────────────────────────────┐
+                                       │ ReportView.tsx                 │
+                                       │   • stages / artifacts         │
+                                       │   • validation findings        │
+                                       │   • gate prompts               │
+                                       │   • download link              │
+                                       └──────────────┬─────────────────┘
+                                                      │  click download
+                                                      v
+                       GET /api/reports/{id}/exports/{ex}/download
+                          → FileResponse(application/pdf)
+```
+
+Key files:
+
+- Frontend trigger: [`frontend/src/components/chat/ChatPanel.tsx`](frontend/src/components/chat/ChatPanel.tsx) · API client: [`frontend/src/lib/api.ts`](frontend/src/lib/api.ts) · UI: [`frontend/src/components/report/ReportView.tsx`](frontend/src/components/report/ReportView.tsx)
+- Backend routes: [`backend/app/api/reports.py`](backend/app/api/reports.py)
+- Orchestration: [`backend/app/services/report_pipeline.py`](backend/app/services/report_pipeline.py)
+- PDF export: [`backend/app/services/report_exporter.py`](backend/app/services/report_exporter.py)
+
 ## Stack
 
 | Layer | Technology |
